@@ -293,6 +293,7 @@ void avfilter_register_all(void)
     REGISTER_FILTER(TRIM,           trim,           vf);
     REGISTER_FILTER(UNSHARP,        unsharp,        vf);
     REGISTER_FILTER(USPP,           uspp,           vf);
+    REGISTER_FILTER(VDPAU,          vdpau,          vf);
     REGISTER_FILTER(VECTORSCOPE,    vectorscope,    vf);
     REGISTER_FILTER(VFLIP,          vflip,          vf);
     REGISTER_FILTER(VIDSTABDETECT,  vidstabdetect,  vf);
