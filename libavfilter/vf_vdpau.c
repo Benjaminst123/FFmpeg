@@ -31,6 +31,9 @@
 #include "libavutil/imgutils.h"
 #include "libavutil/opt.h"
 #include "libavutil/pixdesc.h"
+#include "libavutil/buffer.h"
+#include "libavutil/hwcontext.h"
+#include "libavutil/hwcontext_vdpau.h"
 #include "avfilter.h"
 #include "formats.h"
 #include "internal.h"
@@ -41,6 +44,9 @@ typedef struct {
 
     Display *display;
     char *display_name;
+
+    AVBufferRef *hwdevice;
+    AVBufferRef *hwframe;
 
     VdpDevice         device;
     VdpGetProcAddress *get_proc_address;
@@ -93,7 +99,8 @@ static av_cold int init(AVFilterContext *ctx)
 {
     VdpauContext *s = ctx->priv;
     VdpStatus ret;
-
+    AVHWDeviceContext *device_ctx;
+    AVVDPAUDeviceContext *device_hwctx;
 
 
     s->display = 0;
@@ -116,6 +123,22 @@ static av_cold int init(AVFilterContext *ctx)
     }
 
     s->display_name = XDisplayString(s->display);
+
+    s->hwdevice = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_VDPAU);
+    if (!s->hwdevice) {
+        return AVERROR(ENOMEM);
+    }
+
+    device_ctx       = (AVHWDeviceContext*)s->hwdevice->data;
+    device_ctx->free = NULL;
+
+    device_hwctx = device_ctx->hwctx;
+    device_hwctx->device = s->device;
+    device_hwctx->get_proc_address = s->get_proc_address;
+
+    ret = av_hwdevice_ctx_init(s->hwdevice);
+    if (ret < 0)
+        return ret;
 
     GET_CALLBACK(VDP_FUNC_ID_VIDEO_MIXER_CREATE, s->vdpVideoMixerCreate);
     GET_CALLBACK(VDP_FUNC_ID_VIDEO_MIXER_SET_FEATURE_ENABLES, s->vdpVideoMixerSetFeatureEnables);
@@ -176,7 +199,7 @@ static int config_input(AVFilterLink *inlink)
     VdpVideoMixerAttribute attributes[] = {
         VDP_VIDEO_MIXER_FEATURE_SHARPNESS
     };
-    const float sharpness = 1;
+    const float sharpness = -1;
     const void *attribute_values[] = {
        &sharpness
     };
@@ -233,9 +256,31 @@ static int config_input(AVFilterLink *inlink)
 
 static int config_output(AVFilterLink *outlink)
 {
-//    AVFilterContext *ctx = outlink->src;
-//    VdpauContext *s = ctx->priv;
-//    const AVFilterLink *inlink = ctx->inputs[0];
+    AVFilterContext *ctx = outlink->src;
+    VdpauContext *s = ctx->priv;
+    const AVFilterLink *inlink = ctx->inputs[0];
+
+    AVHWFramesContext *hwframe_ctx;
+    int ret;
+
+    av_buffer_unref(&s->hwframe);
+    s->hwframe = av_hwframe_ctx_alloc(s->hwdevice);
+    if (!s->hwframe)
+        return AVERROR(ENOMEM);
+
+    hwframe_ctx            = (AVHWFramesContext*)s->hwframe->data;
+    hwframe_ctx->format    = AV_PIX_FMT_VDPAU;
+    hwframe_ctx->sw_format = inlink->format;
+    hwframe_ctx->width     = FFALIGN(inlink->w, 16);
+    hwframe_ctx->height    = FFALIGN(inlink->h, 16);
+
+    ret = av_hwframe_ctx_init(s->hwframe);
+    if (ret < 0)
+        return ret;
+
+//    outlink->hw_frames_ctx = av_buffer_ref(s->hwframe);
+//    if (!outlink->hw_frames_ctx)
+//        return AVERROR(ENOMEM);
 
     return 0;
 }
@@ -247,13 +292,34 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
     VdpauContext *s = ctx->priv;
     VdpStatus ret;
     AVFrame *oFrame;
+    AVFrame *iFrame;
 
-    ret = s->vdpVideoSurfacePutBitsYCbCr(s->videosSurface, VDP_YCBCR_FORMAT_YV12, (const void * const*)frame->data, frame->linesize);
-    if (ret != VDP_STATUS_OK) {
-        av_log(ctx, AV_LOG_ERROR, "VDPAU vdpVideoSurfacePutBitsYCbCr on X11 display %s failed: %s\n",
-                s->display_name, s->vdpGetErrorString(ret));
-        return AVERROR_UNKNOWN;
+//    ret = s->vdpVideoSurfacePutBitsYCbCr(s->videosSurface, VDP_YCBCR_FORMAT_YV12, (const void * const*)frame->data, frame->linesize);
+//    if (ret != VDP_STATUS_OK) {
+//        av_log(ctx, AV_LOG_ERROR, "VDPAU vdpVideoSurfacePutBitsYCbCr on X11 display %s failed: %s\n",
+//                s->display_name, s->vdpGetErrorString(ret));
+//        return AVERROR_UNKNOWN;
+//    }
+
+    iFrame = av_frame_alloc();
+    if (!iFrame) {
+        return AVERROR(ENOMEM);
+        av_frame_free(&frame);
     }
+
+    ret = av_hwframe_get_buffer(s->hwframe, iFrame, 0);
+    if (ret < 0) {
+        av_frame_free(&frame);
+        return ret;
+    }
+
+    ret = av_hwframe_transfer_data(iFrame, frame, 0);
+    if (ret < 0) {
+        av_log(ctx, AV_LOG_ERROR, "Error transferring data to the GPU\n");
+        av_frame_free(&frame);
+        av_frame_free(&iFrame);
+    }
+
 
     ret = s->vdpVideoMixerRender(s->mixer,
                                  VDP_INVALID_HANDLE,
@@ -261,7 +327,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
                                  VDP_VIDEO_MIXER_PICTURE_STRUCTURE_FRAME,
                                  0,
                                  NULL,
-                                 s->videosSurface,
+                                 (VdpVideoSurface)iFrame->data[3],
                                  0,
                                  NULL,
                                  NULL,
