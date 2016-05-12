@@ -197,7 +197,7 @@ static int config_input(AVFilterLink *inlink)
     VdpStatus ret;
 
     VdpVideoMixerAttribute attributes[] = {
-        VDP_VIDEO_MIXER_FEATURE_SHARPNESS
+        VDP_VIDEO_MIXER_ATTRIBUTE_SHARPNESS_LEVEL
     };
     const float sharpness = -1;
     const void *attribute_values[] = {
@@ -227,7 +227,7 @@ static int config_input(AVFilterLink *inlink)
         return -1;
     }
 
-    ret = s->vdpVideoMixerSetFeatureEnables(s->mixer, 1, attributes, enables);
+    ret = s->vdpVideoMixerSetFeatureEnables(s->mixer, 1, features, enables);
     if (ret != VDP_STATUS_OK) {
         av_log(ctx, AV_LOG_ERROR, "VDPAU mixer set feature on X11 display %s failed: %s\n",
                 s->display_name, s->vdpGetErrorString(ret));
