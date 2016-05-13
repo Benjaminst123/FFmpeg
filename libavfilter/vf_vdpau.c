@@ -224,11 +224,14 @@ static int config_input(AVFilterLink *inlink)
     VdpStatus ret;
 
     VdpVideoMixerAttribute attributes[] = {
-        VDP_VIDEO_MIXER_ATTRIBUTE_SHARPNESS_LEVEL
+        VDP_VIDEO_MIXER_ATTRIBUTE_SHARPNESS_LEVEL,
+        VDP_VIDEO_MIXER_ATTRIBUTE_NOISE_REDUCTION_LEVEL
     };
     const float sharpness = -1;
+    const float noise_reduction = 1;
     const void *attribute_values[] = {
-       &sharpness
+       &sharpness,
+       &noise_reduction
     };
 
     VdpBool enables[] = {
@@ -236,7 +239,10 @@ static int config_input(AVFilterLink *inlink)
     };
 
     VdpVideoMixerFeature features[] = {
-        VDP_VIDEO_MIXER_FEATURE_SHARPNESS
+        VDP_VIDEO_MIXER_FEATURE_SHARPNESS,
+        VDP_VIDEO_MIXER_FEATURE_DEINTERLACE_TEMPORAL,
+        VDP_VIDEO_MIXER_FEATURE_INVERSE_TELECINE,
+        VDP_VIDEO_MIXER_FEATURE_NOISE_REDUCTION
     };
     VdpVideoMixerParameter parameters[] = {
         VDP_VIDEO_MIXER_PARAMETER_VIDEO_SURFACE_WIDTH,
