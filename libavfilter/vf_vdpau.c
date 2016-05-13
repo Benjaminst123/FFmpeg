@@ -39,6 +39,9 @@
 #include "internal.h"
 #include "video.h"
 
+#define MAX_FUTURE_FRAMES 3
+#define MAX_PAST_FRAMES 3
+
 typedef struct {
     const AVClass *class;
 
@@ -72,6 +75,17 @@ typedef struct {
     VdpDeviceDestroy *vdpDeviceDestroy;
 
     VdpGetErrorString *vdpGetErrorString;
+
+    AVFrame *cur_frame;
+
+    int future_frames_cnt;
+    AVFrame *future_frames[MAX_FUTURE_FRAMES];
+
+    int past_frames_cnt;
+    AVFrame *past_frames[MAX_PAST_FRAMES];
+
+    int eof;
+
 } VdpauContext;
 
 #define OFFSET(x) offsetof(DetelecineContext, x)
@@ -101,6 +115,7 @@ static av_cold int init(AVFilterContext *ctx)
     VdpStatus ret;
     AVHWDeviceContext *device_ctx;
     AVVDPAUDeviceContext *device_hwctx;
+    int i = 0;
 
 
     s->display = 0;
@@ -155,6 +170,18 @@ static av_cold int init(AVFilterContext *ctx)
     GET_CALLBACK(VDP_FUNC_ID_VIDEO_SURFACE_DESTROY, s->vdpVideoSurfaceDestroy);
     GET_CALLBACK(VDP_FUNC_ID_GET_ERROR_STRING, s->vdpGetErrorString);
     GET_CALLBACK(VDP_FUNC_ID_VIDEO_MIXER_SET_ATTRIBUTE_VALUES, s->vdpVideoMixerSetAttributeValues);
+
+    s->future_frames_cnt = 0;
+    s->past_frames_cnt   = 0;
+
+    //TODO: memset
+    s->cur_frame = NULL;
+    for (i = 0; i < MAX_FUTURE_FRAMES; i++) {
+        s->future_frames[i] = NULL;
+    }
+    for (i = 0; i < MAX_PAST_FRAMES; i++) {
+        s->past_frames[i] = NULL;
+    }
 
     return 0;
 }
@@ -293,6 +320,10 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
     VdpStatus ret;
     AVFrame *oFrame;
     AVFrame *iFrame;
+    int i;
+    VdpVideoSurface pastVideoSurfaces[MAX_PAST_FRAMES];
+    VdpVideoSurface futureVideoSurfaces[MAX_FUTURE_FRAMES];
+    AVFrame *oldFrame;
 
 //    ret = s->vdpVideoSurfacePutBitsYCbCr(s->videosSurface, VDP_YCBCR_FORMAT_YV12, (const void * const*)frame->data, frame->linesize);
 //    if (ret != VDP_STATUS_OK) {
@@ -301,35 +332,87 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
 //        return AVERROR_UNKNOWN;
 //    }
 
-    iFrame = av_frame_alloc();
-    if (!iFrame) {
-        return AVERROR(ENOMEM);
-        av_frame_free(&frame);
+    if (frame != NULL) {
+        iFrame = av_frame_alloc();
+        if (!iFrame) {
+            return AVERROR(ENOMEM);
+            av_frame_free(&frame);
+        }
+
+        ret = av_hwframe_get_buffer(s->hwframe, iFrame, 0);
+        if (ret < 0) {
+            av_frame_free(&frame);
+            return ret;
+        }
+
+        ret = av_hwframe_transfer_data(iFrame, frame, 0);
+        if (ret < 0) {
+            av_log(ctx, AV_LOG_ERROR, "Error transferring data to the GPU\n");
+            av_frame_free(&frame);
+            av_frame_free(&iFrame);
+            return ret;
+        }
+        av_frame_copy_props(iFrame, frame);
+    } else {
+        iFrame = NULL;
     }
 
-    ret = av_hwframe_get_buffer(s->hwframe, iFrame, 0);
-    if (ret < 0) {
-        av_frame_free(&frame);
-        return ret;
+    //free oldes frame
+    oldFrame = s->past_frames[MAX_PAST_FRAMES -1];
+    if (oldFrame != NULL) {
+        av_frame_unref(oldFrame);
     }
 
-    ret = av_hwframe_transfer_data(iFrame, frame, 0);
-    if (ret < 0) {
-        av_log(ctx, AV_LOG_ERROR, "Error transferring data to the GPU\n");
-        av_frame_free(&frame);
-        av_frame_free(&iFrame);
+    //update old frames
+    for (i = MAX_PAST_FRAMES; i-- > 1;) {
+        s->past_frames[i] = s->past_frames[i - 1];
+    }
+    s->past_frames[0] = s->cur_frame;
+    //s->old_frames_cnt = (s->old_frames_cnt >= MAX_OLD_FRAMES) ? MAX_OLD_FRAMES : s->old_frames_cnt++;
+
+    s->cur_frame = s->future_frames[0];
+
+    //update next frames
+    for (i = 1; i < MAX_FUTURE_FRAMES; i++) {
+        s->future_frames[i - 1] = s->future_frames[i];
+    }
+    s->future_frames[MAX_FUTURE_FRAMES - 1] = iFrame;
+
+    if (s->cur_frame == NULL) {
+        return 0;
     }
 
+    if (s->future_frames[0] == NULL && s->cur_frame != 0) {
+        s->eof = 1;
+    }
+
+    //setup past videoSurfaces
+    for (i = 0; i < MAX_PAST_FRAMES; i++) {
+        if (s->past_frames[i] != NULL) {
+            pastVideoSurfaces[i] = (VdpVideoSurface)s->past_frames[i]->data[3];
+        } else {
+            pastVideoSurfaces[i] = VDP_INVALID_HANDLE;
+        }
+    }
+
+    //setup future videoSurfaces
+    for (i = 0; i < MAX_FUTURE_FRAMES; i++) {
+        if (s->future_frames[i] != NULL) {
+            futureVideoSurfaces[i] = (VdpVideoSurface)s->future_frames[i]->data[3];
+        } else {
+            futureVideoSurfaces[i] = VDP_INVALID_HANDLE;
+        }
+    }
 
     ret = s->vdpVideoMixerRender(s->mixer,
                                  VDP_INVALID_HANDLE,
                                  NULL,
                                  VDP_VIDEO_MIXER_PICTURE_STRUCTURE_FRAME,
-                                 0,
-                                 NULL,
-                                 (VdpVideoSurface)iFrame->data[3],
-                                 0,
-                                 NULL,
+                                 MAX_PAST_FRAMES,
+                                 pastVideoSurfaces,
+                                 (VdpVideoSurface)s->cur_frame->data[3],
+                                 MAX_FUTURE_FRAMES,
+                                 futureVideoSurfaces,
                                  NULL,
                                  s->outputSurface,
                                  NULL, //???
@@ -343,7 +426,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
     }
 
     oFrame = ff_get_video_buffer(outlink, outlink->w, outlink->h);
-    av_frame_copy_props(oFrame, frame);
+    av_frame_copy_props(oFrame, s->cur_frame);
 
 
     s->vdpOutputSurfaceGetBitsNative(s->outputSurface, NULL, (void * const*)oFrame->data, oFrame->linesize);
@@ -355,6 +438,24 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
 
     av_frame_free(&frame);
     return ff_filter_frame(outlink, oFrame);
+}
+
+static int request_frame(AVFilterLink *link)
+{
+    AVFilterContext *ctx = link->src;
+    VdpauContext *s = ctx->priv;
+    int ret;
+
+    if (s->eof)
+        return AVERROR_EOF;
+
+    ret = ff_request_frame(link->src->inputs[0]);
+
+    if (ret == AVERROR_EOF && s->cur_frame) {
+        ret = filter_frame(link->src->inputs[0], NULL);
+    }
+
+    return ret;
 }
 
 static av_cold void uninit(AVFilterContext *ctx)
@@ -380,6 +481,7 @@ static const AVFilterPad vdpau_outputs[] = {
     {
         .name          = "default",
         .type          = AVMEDIA_TYPE_VIDEO,
+        .request_frame = request_frame,
         .config_props  = config_output,
     },
     { NULL }
