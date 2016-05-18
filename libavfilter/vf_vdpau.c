@@ -42,6 +42,16 @@
 #define MAX_FUTURE_FRAMES 3
 #define MAX_PAST_FRAMES 3
 
+#define MAX_SUPPORTED_FEATURES 4
+#define MAX_SUPPORTED_ATTRIBUTES 4
+
+enum DeinterlaceMethode {
+    WAVE,
+    BOB,
+    TEMPORAL,
+    TEMPORAL_SPATIAL
+};
+
 typedef struct {
     const AVClass *class;
 
@@ -57,6 +67,8 @@ typedef struct {
     VdpVideoMixer mixer;
     VdpVideoMixerCreate *vdpVideoMixerCreate;
     VdpVideoMixerSetFeatureEnables *vdpVideoMixerSetFeatureEnables;
+
+    VdpVideoMixerQueryFeatureSupport *vdpVideoMixerQueryFeatureSupport;
 
     VdpVideoMixerSetAttributeValues *vdpVideoMixerSetAttributeValues;
 
@@ -76,6 +88,13 @@ typedef struct {
 
     VdpGetErrorString *vdpGetErrorString;
 
+    VdpVideoMixerAttribute attributes[MAX_SUPPORTED_ATTRIBUTES];
+    const void *attribute_values[MAX_SUPPORTED_ATTRIBUTES];
+    int attribute_cnt;
+
+    VdpVideoMixerFeature features[MAX_SUPPORTED_FEATURES];
+    int feature_cnt;
+
     AVFrame *cur_frame;
 
     int future_frames_cnt;
@@ -86,13 +105,24 @@ typedef struct {
 
     int eof;
 
+    float noise_reduction;
+    float sharpness;
+    int deinterlacer;
+
 } VdpauContext;
 
-#define OFFSET(x) offsetof(DetelecineContext, x)
+#define OFFSET(x) offsetof(VdpauContext, x)
 #define FLAGS AV_OPT_FLAG_FILTERING_PARAM|AV_OPT_FLAG_VIDEO_PARAM
 
 static const AVOption vdpau_options[] = {
-    {NULL}
+    { "noise_reduction", "set interlacing threshold", OFFSET(noise_reduction),   AV_OPT_TYPE_FLOAT, {.dbl = 0}, 0, 1.0, FLAGS },
+    { "sharpness", "set progressive threshold", OFFSET(sharpness), AV_OPT_TYPE_FLOAT, {.dbl = 0},  -1, 1, FLAGS },
+    { "deinterlacer", "set deinterlacing methode", OFFSET(deinterlacer), AV_OPT_TYPE_INT, {.i64 = 0},  0, TEMPORAL-1, FLAGS, "deinterlacer"},
+        {"wave", "wave deinterlacer", 0, AV_OPT_TYPE_CONST, {.i64=WAVE}, 0, 0, FLAGS, "deinterlacer"},
+        {"bob", "bob deinterlacer", 0, AV_OPT_TYPE_CONST, {.i64=BOB}, 0, 0, FLAGS, "deinterlacer"},
+        {"temporal", "temporal deinterlacer", 0, AV_OPT_TYPE_CONST, {.i64=TEMPORAL}, 0, 0, FLAGS, "deinterlacer"},
+        {"temporal spatial", "temporal spatial deinterlacer", 0, AV_OPT_TYPE_CONST, {.i64=TEMPORAL_SPATIAL}, 0, 0, FLAGS, "deinterlacer"},
+    { NULL }
 };
 
 AVFILTER_DEFINE_CLASS(vdpau);
@@ -109,6 +139,24 @@ do {                                                                            
     result = tmp;                                                               \
 } while (0)
 
+static int check_support(VdpauContext *s, VdpVideoMixerFeature feature, const char* name) {
+    VdpBool is_supported;
+    VdpStatus ret;
+
+    ret = s->vdpVideoMixerQueryFeatureSupport(s->device, VDP_VIDEO_MIXER_FEATURE_SHARPNESS, &is_supported);
+    if (ret != VDP_STATUS_OK) {
+        av_log(NULL, AV_LOG_ERROR, "VDPAU mixer query feature %s failed: %s\n",
+                s->display_name, s->vdpGetErrorString(ret));
+        return AVERROR_UNKNOWN;
+    }
+    if (is_supported == VDP_FALSE) {
+        av_log(NULL, AV_LOG_ERROR, "%s is not supported!", name);
+        return AVERROR_UNKNOWN;
+    }
+
+    return 0;
+}
+
 static av_cold int init(AVFilterContext *ctx)
 {
     VdpauContext *s = ctx->priv;
@@ -121,6 +169,7 @@ static av_cold int init(AVFilterContext *ctx)
     s->display = 0;
     s->device  = 0;
     s->mixer   = 0;
+    s->feature_cnt = 0;
 
     s->display = XOpenDisplay(0);
     if (!s->display) {
@@ -170,6 +219,45 @@ static av_cold int init(AVFilterContext *ctx)
     GET_CALLBACK(VDP_FUNC_ID_VIDEO_SURFACE_DESTROY, s->vdpVideoSurfaceDestroy);
     GET_CALLBACK(VDP_FUNC_ID_GET_ERROR_STRING, s->vdpGetErrorString);
     GET_CALLBACK(VDP_FUNC_ID_VIDEO_MIXER_SET_ATTRIBUTE_VALUES, s->vdpVideoMixerSetAttributeValues);
+    GET_CALLBACK(VDP_FUNC_ID_VIDEO_MIXER_QUERY_FEATURE_SUPPORT, s->vdpVideoMixerQueryFeatureSupport);
+
+    //Check if features selected are supported
+    if (s->sharpness != 0) {
+        ret = check_support(s, VDP_VIDEO_MIXER_FEATURE_SHARPNESS, "sharpness change");
+        if (ret < 0) {
+            return ret;
+        }
+        s->features[s->feature_cnt++] = VDP_VIDEO_MIXER_FEATURE_SHARPNESS;
+
+        s->attributes[s->attribute_cnt] = VDP_VIDEO_MIXER_ATTRIBUTE_SHARPNESS_LEVEL;
+        s->attribute_values[s->attribute_cnt++] = &s->sharpness;
+    }
+
+    if (s->noise_reduction != 0) {
+        ret = check_support(s, VDP_VIDEO_MIXER_FEATURE_NOISE_REDUCTION, "noise reduction");
+        if (ret < 0) {
+            return ret;
+        }
+        s->features[s->feature_cnt++] = VDP_VIDEO_MIXER_FEATURE_NOISE_REDUCTION;
+        s->attributes[s->attribute_cnt] = VDP_VIDEO_MIXER_ATTRIBUTE_NOISE_REDUCTION_LEVEL;
+        s->attribute_values[s->attribute_cnt++] = &s->noise_reduction;
+    }
+
+    if (s->deinterlacer == TEMPORAL) {
+        ret = check_support(s, VDP_VIDEO_MIXER_FEATURE_DEINTERLACE_TEMPORAL, "temporal deinterlacer");
+        if (ret < 0) {
+            return ret;
+        }
+        s->features[s->feature_cnt++] = VDP_VIDEO_MIXER_FEATURE_DEINTERLACE_TEMPORAL;
+    }
+
+    if (s->deinterlacer == TEMPORAL_SPATIAL) {
+        ret = check_support(s, VDP_VIDEO_MIXER_FEATURE_DEINTERLACE_TEMPORAL, "temporal spatial deinterlacer");
+        if (ret < 0) {
+            return ret;
+        }
+        s->features[s->feature_cnt++] = VDP_VIDEO_MIXER_FEATURE_DEINTERLACE_TEMPORAL_SPATIAL;
+    }
 
     s->future_frames_cnt = 0;
     s->past_frames_cnt   = 0;
@@ -222,28 +310,7 @@ static int config_input(AVFilterLink *inlink)
     AVFilterContext *ctx = inlink->dst;
     VdpauContext *s = inlink->dst->priv;
     VdpStatus ret;
-
-    VdpVideoMixerAttribute attributes[] = {
-        VDP_VIDEO_MIXER_ATTRIBUTE_SHARPNESS_LEVEL,
-        VDP_VIDEO_MIXER_ATTRIBUTE_NOISE_REDUCTION_LEVEL
-    };
-    const float sharpness = -1;
-    const float noise_reduction = 1;
-    const void *attribute_values[] = {
-       &sharpness,
-       &noise_reduction
-    };
-
-    VdpBool enables[] = {
-        VDP_TRUE
-    };
-
-    VdpVideoMixerFeature features[] = {
-        VDP_VIDEO_MIXER_FEATURE_SHARPNESS,
-        VDP_VIDEO_MIXER_FEATURE_DEINTERLACE_TEMPORAL,
-        VDP_VIDEO_MIXER_FEATURE_INVERSE_TELECINE,
-        VDP_VIDEO_MIXER_FEATURE_NOISE_REDUCTION
-    };
+    VdpBool enables[MAX_SUPPORTED_FEATURES] = { VDP_TRUE };
     VdpVideoMixerParameter parameters[] = {
         VDP_VIDEO_MIXER_PARAMETER_VIDEO_SURFACE_WIDTH,
         VDP_VIDEO_MIXER_PARAMETER_VIDEO_SURFACE_HEIGHT,
@@ -253,21 +320,21 @@ static int config_input(AVFilterLink *inlink)
         &inlink->h
     };
 
-    ret = s->vdpVideoMixerCreate(s->device, 1, features, 2, parameters, parameter_values, &s->mixer);
+    ret = s->vdpVideoMixerCreate(s->device, s->feature_cnt, s->features, 2, parameters, parameter_values, &s->mixer);
     if (ret != VDP_STATUS_OK) {
         av_log(ctx, AV_LOG_ERROR, "VDPAU mixer creation on X11 display %s failed: %s\n",
                 s->display_name, s->vdpGetErrorString(ret));
         return -1;
     }
 
-    ret = s->vdpVideoMixerSetFeatureEnables(s->mixer, 1, features, enables);
+    ret = s->vdpVideoMixerSetFeatureEnables(s->mixer, s->feature_cnt, s->features, enables);
     if (ret != VDP_STATUS_OK) {
         av_log(ctx, AV_LOG_ERROR, "VDPAU mixer set feature on X11 display %s failed: %s\n",
                 s->display_name, s->vdpGetErrorString(ret));
         return -1;
     }
 
-    ret = s->vdpVideoMixerSetAttributeValues(s->mixer, 1, attributes, attribute_values);
+    ret = s->vdpVideoMixerSetAttributeValues(s->mixer, s->attribute_cnt, s->attributes, s->attribute_values);
 
     ret = s->vdpVideoSurfaceCreate(s->device, VDP_CHROMA_TYPE_420, inlink->w, inlink->h, &s->videosSurface);
     if (ret != VDP_STATUS_OK) {
@@ -413,7 +480,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
     ret = s->vdpVideoMixerRender(s->mixer,
                                  VDP_INVALID_HANDLE,
                                  NULL,
-                                 VDP_VIDEO_MIXER_PICTURE_STRUCTURE_FRAME,
+                                 VDP_VIDEO_MIXER_PICTURE_STRUCTURE_TOP_FIELD,
                                  MAX_PAST_FRAMES,
                                  pastVideoSurfaces,
                                  (VdpVideoSurface)s->cur_frame->data[3],
