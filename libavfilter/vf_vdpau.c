@@ -46,7 +46,7 @@
 #define MAX_SUPPORTED_ATTRIBUTES 4
 
 enum DeinterlaceMethode {
-    WAVE,
+    NONE,
     BOB,
     TEMPORAL,
     TEMPORAL_SPATIAL
@@ -108,7 +108,6 @@ typedef struct {
     float noise_reduction;
     float sharpness;
     int deinterlacer;
-
 } VdpauContext;
 
 #define OFFSET(x) offsetof(VdpauContext, x)
@@ -117,11 +116,10 @@ typedef struct {
 static const AVOption vdpau_options[] = {
     { "noise_reduction", "set interlacing threshold", OFFSET(noise_reduction),   AV_OPT_TYPE_FLOAT, {.dbl = 0}, 0, 1.0, FLAGS },
     { "sharpness", "set progressive threshold", OFFSET(sharpness), AV_OPT_TYPE_FLOAT, {.dbl = 0},  -1, 1, FLAGS },
-    { "deinterlacer", "set deinterlacing methode", OFFSET(deinterlacer), AV_OPT_TYPE_INT, {.i64 = 0},  0, TEMPORAL-1, FLAGS, "deinterlacer"},
-        {"wave", "wave deinterlacer", 0, AV_OPT_TYPE_CONST, {.i64=WAVE}, 0, 0, FLAGS, "deinterlacer"},
+    { "deinterlacer", "set deinterlacing methode", OFFSET(deinterlacer), AV_OPT_TYPE_INT, {.i64 = 0},  0, TEMPORAL_SPATIAL, FLAGS, "deinterlacer"},
         {"bob", "bob deinterlacer", 0, AV_OPT_TYPE_CONST, {.i64=BOB}, 0, 0, FLAGS, "deinterlacer"},
         {"temporal", "temporal deinterlacer", 0, AV_OPT_TYPE_CONST, {.i64=TEMPORAL}, 0, 0, FLAGS, "deinterlacer"},
-        {"temporal spatial", "temporal spatial deinterlacer", 0, AV_OPT_TYPE_CONST, {.i64=TEMPORAL_SPATIAL}, 0, 0, FLAGS, "deinterlacer"},
+        {"temporal_spatial", "temporal spatial deinterlacer", 0, AV_OPT_TYPE_CONST, {.i64=TEMPORAL_SPATIAL}, 0, 0, FLAGS, "deinterlacer"},
     { NULL }
 };
 
@@ -371,8 +369,8 @@ static int config_output(AVFilterLink *outlink)
     hwframe_ctx            = (AVHWFramesContext*)s->hwframe->data;
     hwframe_ctx->format    = AV_PIX_FMT_VDPAU;
     hwframe_ctx->sw_format = inlink->format;
-    hwframe_ctx->width     = FFALIGN(inlink->w, 16);
-    hwframe_ctx->height    = FFALIGN(inlink->h, 16);
+    hwframe_ctx->width     = /*FFALIGN(*/inlink->w;//, 16);
+    hwframe_ctx->height    = /*FFALIGN(*/inlink->h;//, 16);
 
     ret = av_hwframe_ctx_init(s->hwframe);
     if (ret < 0)
@@ -397,6 +395,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
     VdpVideoSurface pastVideoSurfaces[MAX_PAST_FRAMES];
     VdpVideoSurface futureVideoSurfaces[MAX_FUTURE_FRAMES];
     AVFrame *oldFrame;
+    VdpVideoMixerPictureStructure picture_structure;
 
 //    ret = s->vdpVideoSurfacePutBitsYCbCr(s->videosSurface, VDP_YCBCR_FORMAT_YV12, (const void * const*)frame->data, frame->linesize);
 //    if (ret != VDP_STATUS_OK) {
@@ -477,10 +476,18 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
         }
     }
 
+    if (s->deinterlacer != NONE && s->cur_frame->interlaced_frame) {
+        picture_structure = s->cur_frame->top_field_first ? VDP_VIDEO_MIXER_PICTURE_STRUCTURE_TOP_FIELD :
+                VDP_VIDEO_MIXER_PICTURE_STRUCTURE_BOTTOM_FIELD;
+    } else {
+        picture_structure = VDP_VIDEO_MIXER_PICTURE_STRUCTURE_FRAME;
+    }
+
+
     ret = s->vdpVideoMixerRender(s->mixer,
                                  VDP_INVALID_HANDLE,
                                  NULL,
-                                 VDP_VIDEO_MIXER_PICTURE_STRUCTURE_TOP_FIELD,
+                                 picture_structure,
                                  MAX_PAST_FRAMES,
                                  pastVideoSurfaces,
                                  (VdpVideoSurface)s->cur_frame->data[3],
