@@ -108,6 +108,7 @@ typedef struct {
     float noise_reduction;
     float sharpness;
     int deinterlacer;
+    int double_framerate;
 } VdpauContext;
 
 #define OFFSET(x) offsetof(VdpauContext, x)
@@ -120,6 +121,7 @@ static const AVOption vdpau_options[] = {
         {"bob", "bob deinterlacer", 0, AV_OPT_TYPE_CONST, {.i64=BOB}, 0, 0, FLAGS, "deinterlacer"},
         {"temporal", "temporal deinterlacer", 0, AV_OPT_TYPE_CONST, {.i64=TEMPORAL}, 0, 0, FLAGS, "deinterlacer"},
         {"temporal_spatial", "temporal spatial deinterlacer", 0, AV_OPT_TYPE_CONST, {.i64=TEMPORAL_SPATIAL}, 0, 0, FLAGS, "deinterlacer"},
+    { "double_framerate", "double framerate", OFFSET(double_framerate), AV_OPT_TYPE_INT, {.i64 = 0}, 0, 1, FLAGS },
     { NULL }
 };
 
@@ -357,6 +359,7 @@ static int config_output(AVFilterLink *outlink)
     AVFilterContext *ctx = outlink->src;
     VdpauContext *s = ctx->priv;
     const AVFilterLink *inlink = ctx->inputs[0];
+    AVRational fps = inlink->frame_rate;
 
     AVHWFramesContext *hwframe_ctx;
     int ret;
@@ -371,6 +374,14 @@ static int config_output(AVFilterLink *outlink)
     hwframe_ctx->sw_format = inlink->format;
     hwframe_ctx->width     = /*FFALIGN(*/inlink->w;//, 16);
     hwframe_ctx->height    = /*FFALIGN(*/inlink->h;//, 16);
+
+    if (s->double_framerate) {
+        outlink->time_base.num = ctx->inputs[0]->time_base.num;
+        outlink->time_base.den = ctx->inputs[0]->time_base.den * 2;
+
+        outlink->frame_rate = av_mul_q(ctx->inputs[0]->frame_rate, (AVRational){2, 1});
+    }
+
 
     ret = av_hwframe_ctx_init(s->hwframe);
     if (ret < 0)
@@ -389,7 +400,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
     AVFilterLink *outlink = ctx->outputs[0];
     VdpauContext *s = ctx->priv;
     VdpStatus ret;
-    AVFrame *oFrame;
+    AVFrame *oFrame, *oFrame2;
     AVFrame *iFrame;
     int i;
     VdpVideoSurface pastVideoSurfaces[MAX_PAST_FRAMES];
@@ -505,6 +516,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
         return AVERROR_UNKNOWN;
     }
 
+
     oFrame = ff_get_video_buffer(outlink, outlink->w, outlink->h);
     av_frame_copy_props(oFrame, s->cur_frame);
 
@@ -516,8 +528,63 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
         return AVERROR_UNKNOWN;
     }
 
+
+    if (s->double_framerate) {
+        oFrame->pts *= 2;
+
+        if (picture_structure == VDP_VIDEO_MIXER_PICTURE_STRUCTURE_TOP_FIELD) {
+            picture_structure = VDP_VIDEO_MIXER_PICTURE_STRUCTURE_BOTTOM_FIELD;
+        } else {
+            picture_structure = VDP_VIDEO_MIXER_PICTURE_STRUCTURE_TOP_FIELD;
+        }
+
+        ret = s->vdpVideoMixerRender(s->mixer,
+                                     VDP_INVALID_HANDLE,
+                                     NULL,
+                                     picture_structure,
+                                     MAX_PAST_FRAMES,
+                                     pastVideoSurfaces,
+                                     (VdpVideoSurface)s->cur_frame->data[3],
+                                     MAX_FUTURE_FRAMES,
+                                     futureVideoSurfaces,
+                                     NULL,
+                                     s->outputSurface,
+                                     NULL, //???
+                                     NULL,
+                                     0,
+                                     NULL);
+        if (ret != VDP_STATUS_OK) {
+            av_log(ctx, AV_LOG_ERROR, "VDPAU video mixer render on X11 display %s failed: %s\n",
+                    s->display_name, s->vdpGetErrorString(ret));
+            return AVERROR_UNKNOWN;
+        }
+
+        oFrame2 = ff_get_video_buffer(outlink, outlink->w, outlink->h);
+        av_frame_copy_props(oFrame2, s->cur_frame);
+
+        if (s->future_frames[0] != NULL) {
+            oFrame2->pts += s->future_frames[0]->pts;
+        } else {
+            oFrame2->pts *= 2;
+        }
+
+        s->vdpOutputSurfaceGetBitsNative(s->outputSurface, NULL, (void * const*)oFrame2->data, oFrame2->linesize);
+        if (ret != VDP_STATUS_OK) {
+            av_log(ctx, AV_LOG_ERROR, "VDPAU vdpOutputSurfaceGetBitsNative on X11 display %s failed: %s\n",
+                    s->display_name, s->vdpGetErrorString(ret));
+            return AVERROR_UNKNOWN;
+        }
+    }
+
     av_frame_free(&frame);
-    return ff_filter_frame(outlink, oFrame);
+    ret = ff_filter_frame(outlink, oFrame);
+    if (ret < 0) {
+        return ret;
+    }
+    if (s->double_framerate) {
+        ret = ff_filter_frame(outlink, oFrame2);
+    }
+    return ret;
 }
 
 static int request_frame(AVFilterLink *link)
