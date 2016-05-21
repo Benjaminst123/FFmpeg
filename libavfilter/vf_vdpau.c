@@ -115,6 +115,30 @@ enum EOFAction {
     EOF_ACTION_PASS
 };
 
+typedef struct VDPAUPRGBFmpMap {
+    VdpRGBAFormat vdpau_fmt;
+    enum AVPixelFormat pix_fmt;
+} VDPAUPRGBFmpMap ;
+
+static const VDPAUPRGBFmpMap  pix_fmts_rgb[] = {
+    { VDP_RGBA_FORMAT_R8G8B8A8, AV_PIX_FMT_RGBA},
+    { VDP_RGBA_FORMAT_B8G8R8A8, AV_PIX_FMT_BGRA},
+    { VDP_INVALID_HANDLE,       AV_PIX_FMT_NONE}
+};
+
+static int get_vdpau_rgb_format(enum AVPixelFormat format)
+{
+    size_t i;
+
+    for (i = 0; i < FF_ARRAY_ELEMS(pix_fmts_rgb); i++) {
+        if (pix_fmts_rgb[i].pix_fmt == format) {
+            return pix_fmts_rgb[i].vdpau_fmt;
+        }
+    }
+
+    return VDP_INVALID_HANDLE;
+}
+
 typedef struct {
     VdpGetProcAddress *get_proc_address;
 
@@ -134,6 +158,7 @@ typedef struct {
     VdpOutputSurfaceGetBitsNative *vdpOutputSurfaceGetBitsNative;
     VdpOutputSurfacePutBitsNative *vdpOutputSurfacePutBitsNative;
     VdpOutputSurfaceQueryGetPutBitsNativeCapabilities *VdpOutputSurfaceQueryGetPutBitsNativeCapabilities;
+    VdpOutputSurfaceQueryCapabilities *VdpOutputSurfaceQueryCapabilities;
 
     VdpVideoMixerDestroy *vdpVideoMixerDestroy;
     VdpVideoMixerRender *vdpVideoMixerRender;
@@ -391,19 +416,10 @@ static int config_overlay_input(AVFilterLink *inlink)
 {
     AVFilterContext *ctx = inlink->dst;
     VdpauContext *s = inlink->dst->priv;
-    VdpauFunctions *vdpauFuncs = &s->vdpaufuncs;
-    VdpStatus status;
     int ret;
     const AVPixFmtDescriptor *pix_desc = av_pix_fmt_desc_get(inlink->format);
     double var_values[OVERLAY_VAR_VARS_NB];
     double res;
-
-    status = vdpauFuncs->vdpOutputSurfaceCreate(s->device, VDP_RGBA_FORMAT_B8G8R8A8, inlink->w, inlink->h, &s->overlaySurface);
-    if (status != VDP_STATUS_OK) {
-        av_log(ctx, AV_LOG_ERROR, "VDPAU overlay surface create on X11 display %s failed: %s\n",
-                s->display_name, vdpauFuncs->vdpGetErrorString(status));
-        return -1;
-    }
 
     /* Finish the configuration by evaluating the expressions
        now when both inputs are configured. */
@@ -579,6 +595,7 @@ static av_cold int init(AVFilterContext *ctx)
     GET_CALLBACK(VDP_FUNC_ID_VIDEO_MIXER_SET_ATTRIBUTE_VALUES, vdpauFuncs->vdpVideoMixerSetAttributeValues);
     GET_CALLBACK(VDP_FUNC_ID_VIDEO_MIXER_QUERY_FEATURE_SUPPORT, vdpauFuncs->vdpVideoMixerQueryFeatureSupport);
     GET_CALLBACK(VDP_FUNC_ID_OUTPUT_SURFACE_QUERY_GET_PUT_BITS_NATIVE_CAPABILITIES, vdpauFuncs->VdpOutputSurfaceQueryGetPutBitsNativeCapabilities);
+    GET_CALLBACK(VDP_FUNC_ID_OUTPUT_SURFACE_QUERY_CAPABILITIES, vdpauFuncs->VdpOutputSurfaceQueryCapabilities);
 
     //Check if features selected are supported
     ret = init_supported_features(s);
@@ -628,6 +645,30 @@ static av_cold int init(AVFilterContext *ctx)
     return 0;
 }
 
+//add format to avff if vdpFormat is supported by VdpOutputSurfacePutBitsNative
+static int add_outputsurface_format(AVFilterContext *ctx, VdpRGBAFormat vdpFormat,
+        int64_t format, AVFilterFormats **avff, uint32_t *w, uint32_t *h)
+{
+    VdpauContext *s = ctx->priv;
+    VdpauFunctions *f = &s->vdpaufuncs;
+    VdpBool supported;
+    VdpStatus status;
+    int ret;
+
+    status = f->VdpOutputSurfaceQueryCapabilities(s->device, vdpFormat, &supported, w, h);
+    if (status != VDP_STATUS_OK) {
+        return AVERROR_UNKNOWN;
+    }
+    if (supported) {
+        if ((ret = ff_add_format(avff, format)) < 0) {
+            return ret;
+        }
+    }
+
+    return 0;
+}
+
+//add format to avff if vdpFormat is supported by VdpOutputSurface
 static int add_outputsurface_in_format(AVFilterContext *ctx, VdpRGBAFormat vdpFormat, int64_t format, AVFilterFormats **avff)
 {
     VdpauContext *s = ctx->priv;
@@ -663,11 +704,27 @@ static int add_supported_overlay_formats(AVFilterContext *ctx, AVFilterFormats *
     return 0;
 }
 
+static int add_supported_output_formats(AVFilterContext *ctx, AVFilterFormats **avff) {
+    int ret;
+    uint32_t max_w, max_h;
+
+    ret = add_outputsurface_format(ctx, VDP_RGBA_FORMAT_R8G8B8A8, AV_PIX_FMT_RGBA, avff, &max_w, &max_h);
+    if (ret < 0) {
+        return ret;
+    }
+    ret = add_outputsurface_format(ctx, VDP_RGBA_FORMAT_B8G8R8A8, AV_PIX_FMT_BGRA, avff, &max_w, &max_h);
+    if (ret < 0) {
+        return ret;
+    }
+
+    return 0;
+}
+
 static int query_formats(AVFilterContext *ctx)
 {
     VdpauContext *s = ctx->priv;
     AVFilterFormats *in_formats;
-    AVFilterFormats *out_formats;
+    AVFilterFormats *out_formats = NULL;
     int ret;
     AVFilterLink *inlink  = ctx->inputs[0];
     AVFilterLink *outlink = ctx->outputs[0];
@@ -675,15 +732,14 @@ static int query_formats(AVFilterContext *ctx)
         AV_PIX_FMT_YUV420P,
         AV_PIX_FMT_NONE
     };
-    static const enum AVPixelFormat pix_fmts_out[] = {
-        AV_PIX_FMT_BGRA,
-        AV_PIX_FMT_NONE
-    };
 
-    in_formats = ff_make_format_list(pix_fmts_in);
-    out_formats = ff_make_format_list(pix_fmts_out);
-    if (!in_formats || !out_formats)
+    if ((in_formats = ff_make_format_list(pix_fmts_in)) == NULL) {
         return AVERROR(ENOMEM);
+    }
+
+    if ((ret = add_supported_output_formats(ctx, &out_formats)) < 0) {
+        return ret;
+    }
 
     ret = ff_formats_ref(in_formats, &inlink->out_formats);
     if (ret < 0)
@@ -866,6 +922,7 @@ static int config_output(AVFilterLink *outlink)
     VdpauContext *s = ctx->priv;
     VdpauFunctions *vdpauFuncs = &s->vdpaufuncs;
     const AVFilterLink *inlink = ctx->inputs[0];
+    VdpRGBAFormat surface_format;
 
     AVHWFramesContext *hwframe_ctx;
     int ret;
@@ -903,12 +960,28 @@ static int config_output(AVFilterLink *outlink)
         }
     }
 
-    ret = vdpauFuncs->vdpOutputSurfaceCreate(s->device, VDP_RGBA_FORMAT_B8G8R8A8, outlink->w, outlink->h, &s->outputSurface);
+    if ((surface_format = get_vdpau_rgb_format(outlink->format) == VDP_INVALID_HANDLE)) {
+        return AVERROR_INVALIDDATA;
+    }
+    ret = vdpauFuncs->vdpOutputSurfaceCreate(s->device, surface_format, outlink->w, outlink->h, &s->outputSurface);
     if (ret != VDP_STATUS_OK) {
         av_log(ctx, AV_LOG_ERROR, "VDPAU output surface create on X11 display %s failed: %s\n",
                 s->display_name, vdpauFuncs->vdpGetErrorString(ret));
         vdpauFuncs->vdpVideoSurfaceDestroy(s->videosSurface);
         return -1;
+    }
+
+    if (s->use_overlay) {
+        VdpStatus status;
+        if ((surface_format = get_vdpau_rgb_format(ctx->inputs[1]->format) == VDP_INVALID_HANDLE)) {
+            return AVERROR_INVALIDDATA;
+        }
+        status = vdpauFuncs->vdpOutputSurfaceCreate(s->device, surface_format, inlink->w, inlink->h, &s->overlaySurface);
+        if (status != VDP_STATUS_OK) {
+            av_log(ctx, AV_LOG_ERROR, "VDPAU overlay surface create on X11 display %s failed: %s\n",
+                    s->display_name, vdpauFuncs->vdpGetErrorString(status));
+            return -1;
+        }
     }
 
     ret = av_hwframe_ctx_init(s->hwframe);
