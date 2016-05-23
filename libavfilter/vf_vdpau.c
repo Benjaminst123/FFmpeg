@@ -53,18 +53,8 @@ enum DeinterlaceMethode {
 };
 
 typedef struct {
-    const AVClass *class;
-
-    Display *display;
-    char *display_name;
-
-    AVBufferRef *hwdevice;
-    AVBufferRef *hwframe;
-
-    VdpDevice         device;
     VdpGetProcAddress *get_proc_address;
 
-    VdpVideoMixer mixer;
     VdpVideoMixerCreate *vdpVideoMixerCreate;
     VdpVideoMixerSetFeatureEnables *vdpVideoMixerSetFeatureEnables;
 
@@ -76,8 +66,6 @@ typedef struct {
     VdpVideoSurfaceDestroy *vdpVideoSurfaceDestroy;
     VdpOutputSurfaceCreate *vdpOutputSurfaceCreate;
     VdpOutputSurfaceDestroy *vdpOutputSurfaceDestroy;
-    VdpVideoSurface   videosSurface;
-    VdpOutputSurface  outputSurface;
 
     VdpVideoSurfacePutBitsYCbCr *vdpVideoSurfacePutBitsYCbCr;
     VdpOutputSurfaceGetBitsNative *vdpOutputSurfaceGetBitsNative;
@@ -87,6 +75,23 @@ typedef struct {
     VdpDeviceDestroy *vdpDeviceDestroy;
 
     VdpGetErrorString *vdpGetErrorString;
+} VdpauFunctions;
+
+typedef struct {
+    const AVClass *class;
+
+    Display *display;
+    char *display_name;
+
+    VdpDevice device;
+    VdpauFunctions vdpaufuncs;
+
+    AVBufferRef *hwdevice;
+    AVBufferRef *hwframe;
+
+    VdpVideoMixer mixer;
+    VdpVideoSurface   videosSurface;
+    VdpOutputSurface  outputSurface;
 
     VdpVideoMixerAttribute attributes[MAX_SUPPORTED_ATTRIBUTES];
     const void *attribute_values[MAX_SUPPORTED_ATTRIBUTES];
@@ -131,7 +136,7 @@ AVFILTER_DEFINE_CLASS(vdpau);
 do {                                                                            \
     void *tmp;                                                                  \
     int err;                                                                    \
-    err = s->get_proc_address(s->device, id, &tmp);                             \
+    err = vdpauFuncs->get_proc_address(s->device, id, &tmp);                    \
     if (err != VDP_STATUS_OK) {                                                 \
         av_log(ctx, AV_LOG_ERROR, "Error getting the " #id " callback.\n");     \
         return -1;                                                              \
@@ -140,13 +145,14 @@ do {                                                                            
 } while (0)
 
 static int check_support(VdpauContext *s, VdpVideoMixerFeature feature, const char* name) {
+    VdpauFunctions *vdpauFuncs = &s->vdpaufuncs;
     VdpBool is_supported;
     VdpStatus ret;
 
-    ret = s->vdpVideoMixerQueryFeatureSupport(s->device, VDP_VIDEO_MIXER_FEATURE_SHARPNESS, &is_supported);
+    ret = vdpauFuncs->vdpVideoMixerQueryFeatureSupport(s->device, VDP_VIDEO_MIXER_FEATURE_SHARPNESS, &is_supported);
     if (ret != VDP_STATUS_OK) {
         av_log(NULL, AV_LOG_ERROR, "VDPAU mixer query feature %s failed: %s\n",
-                s->display_name, s->vdpGetErrorString(ret));
+                s->display_name, vdpauFuncs->vdpGetErrorString(ret));
         return AVERROR_UNKNOWN;
     }
     if (is_supported == VDP_FALSE) {
@@ -157,71 +163,8 @@ static int check_support(VdpauContext *s, VdpVideoMixerFeature feature, const ch
     return 0;
 }
 
-static av_cold int init(AVFilterContext *ctx)
-{
-    VdpauContext *s = ctx->priv;
-    VdpStatus ret;
-    AVHWDeviceContext *device_ctx;
-    AVVDPAUDeviceContext *device_hwctx;
-    int i = 0;
-
-
-    s->display = 0;
-    s->device  = 0;
-    s->mixer   = 0;
-    s->feature_cnt = 0;
-
-    s->display = XOpenDisplay(0);
-    if (!s->display) {
-        av_log(ctx, AV_LOG_ERROR, "Cannot open the X11 display %s.\n",
-               XDisplayName(0));
-        return -1;
-    }
-
-    ret = vdp_device_create_x11(s->display, XDefaultScreen(s->display),
-                                &s->device, &s->get_proc_address);
-    if (ret != VDP_STATUS_OK) {
-        av_log(ctx, AV_LOG_ERROR, "VDPAU device creation on X11 display %s failed.\n",
-                XDisplayName(0));
-        return -1;
-    }
-
-    s->display_name = XDisplayString(s->display);
-
-    s->hwdevice = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_VDPAU);
-    if (!s->hwdevice) {
-        return AVERROR(ENOMEM);
-    }
-
-    device_ctx       = (AVHWDeviceContext*)s->hwdevice->data;
-    device_ctx->free = NULL;
-
-    device_hwctx = device_ctx->hwctx;
-    device_hwctx->device = s->device;
-    device_hwctx->get_proc_address = s->get_proc_address;
-
-    ret = av_hwdevice_ctx_init(s->hwdevice);
-    if (ret < 0)
-        return ret;
-
-    GET_CALLBACK(VDP_FUNC_ID_VIDEO_MIXER_CREATE, s->vdpVideoMixerCreate);
-    GET_CALLBACK(VDP_FUNC_ID_VIDEO_MIXER_SET_FEATURE_ENABLES, s->vdpVideoMixerSetFeatureEnables);
-    GET_CALLBACK(VDP_FUNC_ID_VIDEO_MIXER_DESTROY, s->vdpVideoMixerDestroy);
-    GET_CALLBACK(VDP_FUNC_ID_DEVICE_DESTROY, s->vdpDeviceDestroy);
-    GET_CALLBACK(VDP_FUNC_ID_VIDEO_SURFACE_CREATE, s->vdpVideoSurfaceCreate);
-    GET_CALLBACK(VDP_FUNC_ID_VIDEO_SURFACE_PUT_BITS_Y_CB_CR, s->vdpVideoSurfacePutBitsYCbCr);
-    GET_CALLBACK(VDP_FUNC_ID_OUTPUT_SURFACE_GET_BITS_NATIVE, s->vdpOutputSurfaceGetBitsNative);
-    GET_CALLBACK(VDP_FUNC_ID_OUTPUT_SURFACE_CREATE, s->vdpOutputSurfaceCreate);
-    GET_CALLBACK(VDP_FUNC_ID_DEVICE_DESTROY, s->vdpDeviceDestroy);
-    GET_CALLBACK(VDP_FUNC_ID_VIDEO_MIXER_DESTROY, s->vdpVideoMixerDestroy);
-    GET_CALLBACK(VDP_FUNC_ID_VIDEO_MIXER_RENDER, s->vdpVideoMixerRender);
-    GET_CALLBACK(VDP_FUNC_ID_OUTPUT_SURFACE_DESTROY, s->vdpOutputSurfaceDestroy);
-    GET_CALLBACK(VDP_FUNC_ID_VIDEO_SURFACE_DESTROY, s->vdpVideoSurfaceDestroy);
-    GET_CALLBACK(VDP_FUNC_ID_GET_ERROR_STRING, s->vdpGetErrorString);
-    GET_CALLBACK(VDP_FUNC_ID_VIDEO_MIXER_SET_ATTRIBUTE_VALUES, s->vdpVideoMixerSetAttributeValues);
-    GET_CALLBACK(VDP_FUNC_ID_VIDEO_MIXER_QUERY_FEATURE_SUPPORT, s->vdpVideoMixerQueryFeatureSupport);
-
-    //Check if features selected are supported
+static int init_supported_features(VdpauContext *s) {
+    int ret;
     if (s->sharpness != 0) {
         ret = check_support(s, VDP_VIDEO_MIXER_FEATURE_SHARPNESS, "sharpness change");
         if (ret < 0) {
@@ -257,6 +200,84 @@ static av_cold int init(AVFilterContext *ctx)
             return ret;
         }
         s->features[s->feature_cnt++] = VDP_VIDEO_MIXER_FEATURE_DEINTERLACE_TEMPORAL_SPATIAL;
+    }
+
+    return 0;
+}
+
+static av_cold int init(AVFilterContext *ctx)
+{
+    VdpauContext *s = ctx->priv;
+    VdpauFunctions *vdpauFuncs =  &s->vdpaufuncs;
+    VdpStatus ret;
+    AVHWDeviceContext *device_ctx;
+    AVVDPAUDeviceContext *device_hwctx;
+    int i = 0;
+
+
+    s->display = 0;
+    s->device  = 0;
+    s->mixer   = 0;
+    s->feature_cnt = 0;
+
+    //open display
+    s->display = XOpenDisplay(0);
+    if (!s->display) {
+        av_log(ctx, AV_LOG_ERROR, "Cannot open the X11 display %s.\n",
+               XDisplayName(0));
+        return -1;
+    }
+    s->display_name = XDisplayString(s->display);
+
+    //setup vdpau device
+    ret = vdp_device_create_x11(s->display, XDefaultScreen(s->display),
+                                &s->device, &vdpauFuncs->get_proc_address);
+    if (ret != VDP_STATUS_OK) {
+        av_log(ctx, AV_LOG_ERROR, "VDPAU device creation on X11 display %s failed.\n",
+                XDisplayName(0));
+        return -1;
+    }
+
+    //allocate hardware context
+    s->hwdevice = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_VDPAU);
+    if (!s->hwdevice) {
+        return AVERROR(ENOMEM);
+    }
+
+    device_ctx       = (AVHWDeviceContext*)s->hwdevice->data;
+    device_ctx->free = NULL;
+
+    device_hwctx = device_ctx->hwctx;
+    device_hwctx->device = s->device;
+    device_hwctx->get_proc_address = vdpauFuncs->get_proc_address;
+
+    //init hardware device
+    ret = av_hwdevice_ctx_init(s->hwdevice);
+    if (ret < 0)
+        return ret;
+
+    //retrieve needed vdpau function pointer
+    GET_CALLBACK(VDP_FUNC_ID_VIDEO_MIXER_CREATE, vdpauFuncs->vdpVideoMixerCreate);
+    GET_CALLBACK(VDP_FUNC_ID_VIDEO_MIXER_SET_FEATURE_ENABLES, vdpauFuncs->vdpVideoMixerSetFeatureEnables);
+    GET_CALLBACK(VDP_FUNC_ID_VIDEO_MIXER_DESTROY, vdpauFuncs->vdpVideoMixerDestroy);
+    GET_CALLBACK(VDP_FUNC_ID_DEVICE_DESTROY, vdpauFuncs->vdpDeviceDestroy);
+    GET_CALLBACK(VDP_FUNC_ID_VIDEO_SURFACE_CREATE, vdpauFuncs->vdpVideoSurfaceCreate);
+    GET_CALLBACK(VDP_FUNC_ID_VIDEO_SURFACE_PUT_BITS_Y_CB_CR, vdpauFuncs->vdpVideoSurfacePutBitsYCbCr);
+    GET_CALLBACK(VDP_FUNC_ID_OUTPUT_SURFACE_GET_BITS_NATIVE, vdpauFuncs->vdpOutputSurfaceGetBitsNative);
+    GET_CALLBACK(VDP_FUNC_ID_OUTPUT_SURFACE_CREATE, vdpauFuncs->vdpOutputSurfaceCreate);
+    GET_CALLBACK(VDP_FUNC_ID_DEVICE_DESTROY, vdpauFuncs->vdpDeviceDestroy);
+    GET_CALLBACK(VDP_FUNC_ID_VIDEO_MIXER_DESTROY, vdpauFuncs->vdpVideoMixerDestroy);
+    GET_CALLBACK(VDP_FUNC_ID_VIDEO_MIXER_RENDER, vdpauFuncs->vdpVideoMixerRender);
+    GET_CALLBACK(VDP_FUNC_ID_OUTPUT_SURFACE_DESTROY, vdpauFuncs->vdpOutputSurfaceDestroy);
+    GET_CALLBACK(VDP_FUNC_ID_VIDEO_SURFACE_DESTROY, vdpauFuncs->vdpVideoSurfaceDestroy);
+    GET_CALLBACK(VDP_FUNC_ID_GET_ERROR_STRING, vdpauFuncs->vdpGetErrorString);
+    GET_CALLBACK(VDP_FUNC_ID_VIDEO_MIXER_SET_ATTRIBUTE_VALUES, vdpauFuncs->vdpVideoMixerSetAttributeValues);
+    GET_CALLBACK(VDP_FUNC_ID_VIDEO_MIXER_QUERY_FEATURE_SUPPORT, vdpauFuncs->vdpVideoMixerQueryFeatureSupport);
+
+    //Check if features selected are supported
+    ret = init_supported_features(s);
+    if (ret < 0) {
+        return ret;
     }
 
     s->future_frames_cnt = 0;
@@ -309,6 +330,7 @@ static int config_input(AVFilterLink *inlink)
 {
     AVFilterContext *ctx = inlink->dst;
     VdpauContext *s = inlink->dst->priv;
+    VdpauFunctions *vdpauFuncs = &s->vdpaufuncs;
     VdpStatus ret;
     VdpBool enables[MAX_SUPPORTED_FEATURES] = { VDP_TRUE };
     VdpVideoMixerParameter parameters[] = {
@@ -320,34 +342,34 @@ static int config_input(AVFilterLink *inlink)
         &inlink->h
     };
 
-    ret = s->vdpVideoMixerCreate(s->device, s->feature_cnt, s->features, 2, parameters, parameter_values, &s->mixer);
+    ret = vdpauFuncs->vdpVideoMixerCreate(s->device, s->feature_cnt, s->features, 2, parameters, parameter_values, &s->mixer);
     if (ret != VDP_STATUS_OK) {
         av_log(ctx, AV_LOG_ERROR, "VDPAU mixer creation on X11 display %s failed: %s\n",
-                s->display_name, s->vdpGetErrorString(ret));
+                s->display_name, vdpauFuncs->vdpGetErrorString(ret));
         return -1;
     }
 
-    ret = s->vdpVideoMixerSetFeatureEnables(s->mixer, s->feature_cnt, s->features, enables);
+    ret = vdpauFuncs->vdpVideoMixerSetFeatureEnables(s->mixer, s->feature_cnt, s->features, enables);
     if (ret != VDP_STATUS_OK) {
         av_log(ctx, AV_LOG_ERROR, "VDPAU mixer set feature on X11 display %s failed: %s\n",
-                s->display_name, s->vdpGetErrorString(ret));
+                s->display_name, vdpauFuncs->vdpGetErrorString(ret));
         return -1;
     }
 
-    ret = s->vdpVideoMixerSetAttributeValues(s->mixer, s->attribute_cnt, s->attributes, s->attribute_values);
+    ret = vdpauFuncs->vdpVideoMixerSetAttributeValues(s->mixer, s->attribute_cnt, s->attributes, s->attribute_values);
 
-    ret = s->vdpVideoSurfaceCreate(s->device, VDP_CHROMA_TYPE_420, inlink->w, inlink->h, &s->videosSurface);
+    ret = vdpauFuncs->vdpVideoSurfaceCreate(s->device, VDP_CHROMA_TYPE_420, inlink->w, inlink->h, &s->videosSurface);
     if (ret != VDP_STATUS_OK) {
         av_log(ctx, AV_LOG_ERROR, "VDPAU video surface create on X11 display %s failed failed: %s\n",
-                s->display_name, s->vdpGetErrorString(ret));
+                s->display_name, vdpauFuncs->vdpGetErrorString(ret));
         return -1;
     }
 
-    ret = s->vdpOutputSurfaceCreate(s->device, VDP_RGBA_FORMAT_B8G8R8A8, inlink->w, inlink->h, &s->outputSurface);
+    ret = vdpauFuncs->vdpOutputSurfaceCreate(s->device, VDP_RGBA_FORMAT_B8G8R8A8, inlink->w, inlink->h, &s->outputSurface);
     if (ret != VDP_STATUS_OK) {
         av_log(ctx, AV_LOG_ERROR, "VDPAU output surface create on X11 display %s failed: %s\n",
-                s->display_name, s->vdpGetErrorString(ret));
-        s->vdpVideoSurfaceDestroy(s->videosSurface);
+                s->display_name, vdpauFuncs->vdpGetErrorString(ret));
+        vdpauFuncs->vdpVideoSurfaceDestroy(s->videosSurface);
         return -1;
     }
 
@@ -359,7 +381,6 @@ static int config_output(AVFilterLink *outlink)
     AVFilterContext *ctx = outlink->src;
     VdpauContext *s = ctx->priv;
     const AVFilterLink *inlink = ctx->inputs[0];
-    AVRational fps = inlink->frame_rate;
 
     AVHWFramesContext *hwframe_ctx;
     int ret;
@@ -399,6 +420,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
     AVFilterContext *ctx = inlink->dst;
     AVFilterLink *outlink = ctx->outputs[0];
     VdpauContext *s = ctx->priv;
+    VdpauFunctions *vdpauFuncs = &s->vdpaufuncs;
     VdpStatus ret;
     AVFrame *oFrame, *oFrame2;
     AVFrame *iFrame;
@@ -495,24 +517,24 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
     }
 
 
-    ret = s->vdpVideoMixerRender(s->mixer,
-                                 VDP_INVALID_HANDLE,
-                                 NULL,
-                                 picture_structure,
-                                 MAX_PAST_FRAMES,
-                                 pastVideoSurfaces,
-                                 (VdpVideoSurface)s->cur_frame->data[3],
-                                 MAX_FUTURE_FRAMES,
-                                 futureVideoSurfaces,
-                                 NULL,
-                                 s->outputSurface,
-                                 NULL, //???
-                                 NULL,
-                                 0,
-                                 NULL);
+    ret = vdpauFuncs->vdpVideoMixerRender(s->mixer,
+                                          VDP_INVALID_HANDLE,
+                                          NULL,
+                                          picture_structure,
+                                          MAX_PAST_FRAMES,
+                                          pastVideoSurfaces,
+                                          (VdpVideoSurface)s->cur_frame->data[3],
+                                          MAX_FUTURE_FRAMES,
+                                          futureVideoSurfaces,
+                                          NULL,
+                                          s->outputSurface,
+                                          NULL, //???
+                                          NULL,
+                                          0,
+                                          NULL);
     if (ret != VDP_STATUS_OK) {
         av_log(ctx, AV_LOG_ERROR, "VDPAU video mixer render on X11 display %s failed: %s\n",
-                s->display_name, s->vdpGetErrorString(ret));
+                s->display_name, vdpauFuncs->vdpGetErrorString(ret));
         return AVERROR_UNKNOWN;
     }
 
@@ -521,10 +543,10 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
     av_frame_copy_props(oFrame, s->cur_frame);
 
 
-    s->vdpOutputSurfaceGetBitsNative(s->outputSurface, NULL, (void * const*)oFrame->data, oFrame->linesize);
+    vdpauFuncs->vdpOutputSurfaceGetBitsNative(s->outputSurface, NULL, (void * const*)oFrame->data, oFrame->linesize);
     if (ret != VDP_STATUS_OK) {
         av_log(ctx, AV_LOG_ERROR, "VDPAU vdpOutputSurfaceGetBitsNative on X11 display %s failed: %s\n",
-                s->display_name, s->vdpGetErrorString(ret));
+                s->display_name, vdpauFuncs->vdpGetErrorString(ret));
         return AVERROR_UNKNOWN;
     }
 
@@ -538,24 +560,24 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
             picture_structure = VDP_VIDEO_MIXER_PICTURE_STRUCTURE_TOP_FIELD;
         }
 
-        ret = s->vdpVideoMixerRender(s->mixer,
-                                     VDP_INVALID_HANDLE,
-                                     NULL,
-                                     picture_structure,
-                                     MAX_PAST_FRAMES,
-                                     pastVideoSurfaces,
-                                     (VdpVideoSurface)s->cur_frame->data[3],
-                                     MAX_FUTURE_FRAMES,
-                                     futureVideoSurfaces,
-                                     NULL,
-                                     s->outputSurface,
-                                     NULL, //???
-                                     NULL,
-                                     0,
-                                     NULL);
+        ret = vdpauFuncs->vdpVideoMixerRender(s->mixer,
+                                              VDP_INVALID_HANDLE,
+                                              NULL,
+                                              picture_structure,
+                                              MAX_PAST_FRAMES,
+                                              pastVideoSurfaces,
+                                              (VdpVideoSurface)s->cur_frame->data[3],
+                                              MAX_FUTURE_FRAMES,
+                                              futureVideoSurfaces,
+                                              NULL,
+                                              s->outputSurface,
+                                              NULL, //???
+                                              NULL,
+                                              0,
+                                              NULL);
         if (ret != VDP_STATUS_OK) {
             av_log(ctx, AV_LOG_ERROR, "VDPAU video mixer render on X11 display %s failed: %s\n",
-                    s->display_name, s->vdpGetErrorString(ret));
+                    s->display_name, vdpauFuncs->vdpGetErrorString(ret));
             return AVERROR_UNKNOWN;
         }
 
@@ -568,10 +590,10 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
             oFrame2->pts *= 2;
         }
 
-        s->vdpOutputSurfaceGetBitsNative(s->outputSurface, NULL, (void * const*)oFrame2->data, oFrame2->linesize);
+        vdpauFuncs->vdpOutputSurfaceGetBitsNative(s->outputSurface, NULL, (void * const*)oFrame2->data, oFrame2->linesize);
         if (ret != VDP_STATUS_OK) {
             av_log(ctx, AV_LOG_ERROR, "VDPAU vdpOutputSurfaceGetBitsNative on X11 display %s failed: %s\n",
-                    s->display_name, s->vdpGetErrorString(ret));
+                    s->display_name, vdpauFuncs->vdpGetErrorString(ret));
             return AVERROR_UNKNOWN;
         }
     }
@@ -608,9 +630,10 @@ static int request_frame(AVFilterLink *link)
 static av_cold void uninit(AVFilterContext *ctx)
 {
     VdpauContext *s = ctx->priv;
+    VdpauFunctions *vdpauFuncs = &s->vdpaufuncs;
 
-    if (s->mixer) s->vdpVideoMixerDestroy(s->mixer);
-    if (s->device) s->vdpDeviceDestroy(s->device);
+    if (s->mixer) vdpauFuncs->vdpVideoMixerDestroy(s->mixer);
+    if (s->device) vdpauFuncs->vdpDeviceDestroy(s->device);
     if (s->display) XCloseDisplay(s->display);
 }
 
