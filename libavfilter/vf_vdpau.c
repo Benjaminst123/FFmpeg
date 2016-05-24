@@ -357,6 +357,11 @@ static int config_input(AVFilterLink *inlink)
     }
 
     ret = vdpauFuncs->vdpVideoMixerSetAttributeValues(s->mixer, s->attribute_cnt, s->attributes, s->attribute_values);
+    if (ret != VDP_STATUS_OK) {
+        av_log(ctx, AV_LOG_ERROR, "VDPAU video  mixer set attribute values on X11 display %s failed failed: %s\n",
+                s->display_name, vdpauFuncs->vdpGetErrorString(ret));
+        return -1;
+    }
 
     ret = vdpauFuncs->vdpVideoSurfaceCreate(s->device, VDP_CHROMA_TYPE_420, inlink->w, inlink->h, &s->videosSurface);
     if (ret != VDP_STATUS_OK) {
@@ -408,64 +413,35 @@ static int config_output(AVFilterLink *outlink)
     if (ret < 0)
         return ret;
 
-//    outlink->hw_frames_ctx = av_buffer_ref(s->hwframe);
-//    if (!outlink->hw_frames_ctx)
-//        return AVERROR(ENOMEM);
+    return 0;
+}
+
+static int upload_frame(AVBufferRef *hwframe, AVFrame *frame, AVFrame* src)
+{
+    int ret;
+    ret = av_hwframe_get_buffer(hwframe, frame, 0);
+    if (ret < 0) {
+        return ret;
+    }
+
+    ret = av_hwframe_transfer_data(frame, src, 0);
+    if (ret < 0) {
+        return ret;
+    }
+    av_frame_copy_props(frame, src);
 
     return 0;
 }
 
-static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
+static void update_frames(VdpauContext *s, AVFrame* newFrame)
 {
-    AVFilterContext *ctx = inlink->dst;
-    AVFilterLink *outlink = ctx->outputs[0];
-    VdpauContext *s = ctx->priv;
-    VdpauFunctions *vdpauFuncs = &s->vdpaufuncs;
-    VdpStatus ret;
-    AVFrame *oFrame, *oFrame2;
-    AVFrame *iFrame;
-    int i;
-    VdpVideoSurface pastVideoSurfaces[MAX_PAST_FRAMES];
-    VdpVideoSurface futureVideoSurfaces[MAX_FUTURE_FRAMES];
     AVFrame *oldFrame;
-    VdpVideoMixerPictureStructure picture_structure;
+    int i;
 
-//    ret = s->vdpVideoSurfacePutBitsYCbCr(s->videosSurface, VDP_YCBCR_FORMAT_YV12, (const void * const*)frame->data, frame->linesize);
-//    if (ret != VDP_STATUS_OK) {
-//        av_log(ctx, AV_LOG_ERROR, "VDPAU vdpVideoSurfacePutBitsYCbCr on X11 display %s failed: %s\n",
-//                s->display_name, s->vdpGetErrorString(ret));
-//        return AVERROR_UNKNOWN;
-//    }
-
-    if (frame != NULL) {
-        iFrame = av_frame_alloc();
-        if (!iFrame) {
-            return AVERROR(ENOMEM);
-            av_frame_free(&frame);
-        }
-
-        ret = av_hwframe_get_buffer(s->hwframe, iFrame, 0);
-        if (ret < 0) {
-            av_frame_free(&frame);
-            return ret;
-        }
-
-        ret = av_hwframe_transfer_data(iFrame, frame, 0);
-        if (ret < 0) {
-            av_log(ctx, AV_LOG_ERROR, "Error transferring data to the GPU\n");
-            av_frame_free(&frame);
-            av_frame_free(&iFrame);
-            return ret;
-        }
-        av_frame_copy_props(iFrame, frame);
-    } else {
-        iFrame = NULL;
-    }
-
-    //free oldes frame
+    //free old frames
     oldFrame = s->past_frames[MAX_PAST_FRAMES -1];
     if (oldFrame != NULL) {
-        av_frame_unref(oldFrame);
+        av_frame_free(&oldFrame);
     }
 
     //update old frames
@@ -473,7 +449,6 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
         s->past_frames[i] = s->past_frames[i - 1];
     }
     s->past_frames[0] = s->cur_frame;
-    //s->old_frames_cnt = (s->old_frames_cnt >= MAX_OLD_FRAMES) ? MAX_OLD_FRAMES : s->old_frames_cnt++;
 
     s->cur_frame = s->future_frames[0];
 
@@ -481,54 +456,57 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
     for (i = 1; i < MAX_FUTURE_FRAMES; i++) {
         s->future_frames[i - 1] = s->future_frames[i];
     }
-    s->future_frames[MAX_FUTURE_FRAMES - 1] = iFrame;
+    s->future_frames[MAX_FUTURE_FRAMES - 1] = newFrame;
+}
 
-    if (s->cur_frame == NULL) {
-        return 0;
-    }
-
-    if (s->future_frames[0] == NULL && s->cur_frame != 0) {
-        s->eof = 1;
-    }
-
-    //setup past videoSurfaces
+static void setup_past_surfaces(VdpVideoSurface pastVideoSurfaces[], AVFrame *past_frames[])
+{
+    int i;
     for (i = 0; i < MAX_PAST_FRAMES; i++) {
-        if (s->past_frames[i] != NULL) {
-            pastVideoSurfaces[i] = (VdpVideoSurface)s->past_frames[i]->data[3];
+        if (past_frames[i] != NULL) {
+            pastVideoSurfaces[i] = (VdpVideoSurface)past_frames[i]->data[3];
         } else {
             pastVideoSurfaces[i] = VDP_INVALID_HANDLE;
         }
     }
+}
 
-    //setup future videoSurfaces
+static void setup_future_surfaces(VdpVideoSurface futureVideoSurfaces[], AVFrame *future_frames[])
+{
+    int i;
     for (i = 0; i < MAX_FUTURE_FRAMES; i++) {
-        if (s->future_frames[i] != NULL) {
-            futureVideoSurfaces[i] = (VdpVideoSurface)s->future_frames[i]->data[3];
+        if (future_frames[i] != NULL) {
+            futureVideoSurfaces[i] = (VdpVideoSurface)future_frames[i]->data[3];
         } else {
             futureVideoSurfaces[i] = VDP_INVALID_HANDLE;
         }
     }
+}
 
-    if (s->deinterlacer != NONE && s->cur_frame->interlaced_frame) {
-        picture_structure = s->cur_frame->top_field_first ? VDP_VIDEO_MIXER_PICTURE_STRUCTURE_TOP_FIELD :
-                VDP_VIDEO_MIXER_PICTURE_STRUCTURE_BOTTOM_FIELD;
-    } else {
-        picture_structure = VDP_VIDEO_MIXER_PICTURE_STRUCTURE_FRAME;
-    }
-
+static int render_frame(AVFilterContext *ctx,
+                         VdpVideoMixer mixer,
+                         VdpVideoMixerPictureStructure picture_structure,
+                         VdpVideoSurface *past,
+                         VdpVideoSurface cur,
+                         VdpVideoSurface *future,
+                         VdpOutputSurface out)
+{
+    VdpauContext *s = ctx->priv;
+    VdpauFunctions *vdpauFuncs = &s->vdpaufuncs;
+    VdpStatus ret;
 
     ret = vdpauFuncs->vdpVideoMixerRender(s->mixer,
                                           VDP_INVALID_HANDLE,
                                           NULL,
                                           picture_structure,
                                           MAX_PAST_FRAMES,
-                                          pastVideoSurfaces,
-                                          (VdpVideoSurface)s->cur_frame->data[3],
+                                          past,
+                                          cur,
                                           MAX_FUTURE_FRAMES,
-                                          futureVideoSurfaces,
+                                          future,
                                           NULL,
-                                          s->outputSurface,
-                                          NULL, //???
+                                          out,
+                                          NULL,
                                           NULL,
                                           0,
                                           NULL);
@@ -538,11 +516,63 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
         return AVERROR_UNKNOWN;
     }
 
+    return 0;
+}
 
+
+static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
+{
+    AVFilterContext *ctx = inlink->dst;
+    AVFilterLink *outlink = ctx->outputs[0];
+    VdpauContext *s = ctx->priv;
+    VdpauFunctions *vdpauFuncs = &s->vdpaufuncs;
+    int ret;
+    AVFrame *oFrame, *oFrame2;
+    AVFrame *iFrame;
+    VdpVideoSurface past_surfaces[MAX_PAST_FRAMES];
+    VdpVideoSurface future_surfaces[MAX_FUTURE_FRAMES];
+    VdpVideoMixerPictureStructure picture_structure;
+
+    if (frame != NULL) {
+        iFrame = av_frame_alloc();
+        ret = upload_frame(s->hwframe, iFrame, frame);
+        av_frame_free(&frame);
+        if (ret < 0) {
+            av_frame_free(&iFrame);
+            return ret;
+        }
+    } else {
+        iFrame = NULL;
+    }
+
+    if (s->future_frames[0] == NULL && s->cur_frame != 0) {
+        s->eof = 1;
+    }
+
+    update_frames(s, iFrame);
+    if (s->cur_frame == NULL) {
+        return 0;
+    }
+
+    setup_past_surfaces(past_surfaces, s->past_frames);
+    setup_future_surfaces(future_surfaces, s->future_frames);
+
+    if (s->deinterlacer != NONE && s->cur_frame->interlaced_frame) {
+        picture_structure = s->cur_frame->top_field_first ? VDP_VIDEO_MIXER_PICTURE_STRUCTURE_TOP_FIELD :
+                VDP_VIDEO_MIXER_PICTURE_STRUCTURE_BOTTOM_FIELD;
+    } else {
+        picture_structure = VDP_VIDEO_MIXER_PICTURE_STRUCTURE_FRAME;
+    }
+
+    ret = render_frame(ctx, s->mixer, picture_structure, past_surfaces,
+            (VdpVideoSurface)s->cur_frame->data[3], future_surfaces, s->outputSurface);
+    if (ret < 0) {
+        return ret;
+    }
+
+    //download result to frame
     oFrame = ff_get_video_buffer(outlink, outlink->w, outlink->h);
     av_frame_copy_props(oFrame, s->cur_frame);
-
-
     vdpauFuncs->vdpOutputSurfaceGetBitsNative(s->outputSurface, NULL, (void * const*)oFrame->data, oFrame->linesize);
     if (ret != VDP_STATUS_OK) {
         av_log(ctx, AV_LOG_ERROR, "VDPAU vdpOutputSurfaceGetBitsNative on X11 display %s failed: %s\n",
@@ -560,30 +590,16 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
             picture_structure = VDP_VIDEO_MIXER_PICTURE_STRUCTURE_TOP_FIELD;
         }
 
-        ret = vdpauFuncs->vdpVideoMixerRender(s->mixer,
-                                              VDP_INVALID_HANDLE,
-                                              NULL,
-                                              picture_structure,
-                                              MAX_PAST_FRAMES,
-                                              pastVideoSurfaces,
-                                              (VdpVideoSurface)s->cur_frame->data[3],
-                                              MAX_FUTURE_FRAMES,
-                                              futureVideoSurfaces,
-                                              NULL,
-                                              s->outputSurface,
-                                              NULL, //???
-                                              NULL,
-                                              0,
-                                              NULL);
-        if (ret != VDP_STATUS_OK) {
-            av_log(ctx, AV_LOG_ERROR, "VDPAU video mixer render on X11 display %s failed: %s\n",
-                    s->display_name, vdpauFuncs->vdpGetErrorString(ret));
-            return AVERROR_UNKNOWN;
+        ret = render_frame(ctx, s->mixer, picture_structure, past_surfaces,
+                (VdpVideoSurface)s->cur_frame->data[3], future_surfaces, s->outputSurface);
+        if (ret < 0) {
+            return ret;
         }
 
+
+        //download result to frame
         oFrame2 = ff_get_video_buffer(outlink, outlink->w, outlink->h);
         av_frame_copy_props(oFrame2, s->cur_frame);
-
         if (s->future_frames[0] != NULL) {
             oFrame2->pts += s->future_frames[0]->pts;
         } else {
