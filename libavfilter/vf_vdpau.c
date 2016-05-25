@@ -209,7 +209,8 @@ static av_cold int init(AVFilterContext *ctx)
 {
     VdpauContext *s = ctx->priv;
     VdpauFunctions *vdpauFuncs =  &s->vdpaufuncs;
-    VdpStatus ret;
+    int ret;
+    VdpStatus status;
     AVHWDeviceContext *device_ctx;
     AVVDPAUDeviceContext *device_hwctx;
     int i = 0;
@@ -230,12 +231,12 @@ static av_cold int init(AVFilterContext *ctx)
     s->display_name = XDisplayString(s->display);
 
     //setup vdpau device
-    ret = vdp_device_create_x11(s->display, XDefaultScreen(s->display),
+    status = vdp_device_create_x11(s->display, XDefaultScreen(s->display),
                                 &s->device, &vdpauFuncs->get_proc_address);
-    if (ret != VDP_STATUS_OK) {
+    if (status != VDP_STATUS_OK) {
         av_log(ctx, AV_LOG_ERROR, "VDPAU device creation on X11 display %s failed.\n",
                 XDisplayName(0));
-        return -1;
+        return AVERROR_UNKNOWN;
     }
 
     //allocate hardware context
