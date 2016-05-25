@@ -149,14 +149,14 @@ static int check_support(VdpauContext *s, VdpVideoMixerFeature feature, const ch
     VdpBool is_supported;
     VdpStatus ret;
 
-    ret = vdpauFuncs->vdpVideoMixerQueryFeatureSupport(s->device, VDP_VIDEO_MIXER_FEATURE_SHARPNESS, &is_supported);
+    ret = vdpauFuncs->vdpVideoMixerQueryFeatureSupport(s->device, feature, &is_supported);
     if (ret != VDP_STATUS_OK) {
         av_log(NULL, AV_LOG_ERROR, "VDPAU mixer query feature %s failed: %s\n",
                 s->display_name, vdpauFuncs->vdpGetErrorString(ret));
         return AVERROR_UNKNOWN;
     }
     if (is_supported == VDP_FALSE) {
-        av_log(NULL, AV_LOG_ERROR, "%s is not supported!", name);
+        av_log(NULL, AV_LOG_ERROR, "%s is not supported!\n", name);
         return AVERROR_UNKNOWN;
     }
 
