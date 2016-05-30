@@ -34,6 +34,7 @@
 #include "libavutil/buffer.h"
 #include "libavutil/hwcontext.h"
 #include "libavutil/hwcontext_vdpau.h"
+#include "libavutil/parseutils.h"
 #include "avfilter.h"
 #include "formats.h"
 #include "internal.h"
@@ -114,6 +115,12 @@ typedef struct {
     float sharpness;
     int deinterlacer;
     int double_framerate;
+
+    int scaling_quality;
+    int w;
+    int h;
+
+    char* size_str;
 } VdpauContext;
 
 #define OFFSET(x) offsetof(VdpauContext, x)
@@ -127,6 +134,8 @@ static const AVOption vdpau_options[] = {
         {"temporal", "temporal deinterlacer", 0, AV_OPT_TYPE_CONST, {.i64=TEMPORAL}, 0, 0, FLAGS, "deinterlacer"},
         {"temporal_spatial", "temporal spatial deinterlacer", 0, AV_OPT_TYPE_CONST, {.i64=TEMPORAL_SPATIAL}, 0, 0, FLAGS, "deinterlacer"},
     { "double_framerate", "double framerate", OFFSET(double_framerate), AV_OPT_TYPE_INT, {.i64 = 0}, 0, 1, FLAGS },
+    { "size","set video size", OFFSET(size_str), AV_OPT_TYPE_STRING, {.str = NULL}, 0, FLAGS },
+    { "scaling_quality", "set scaling quality", OFFSET(scaling_quality), AV_OPT_TYPE_INT, {.i64 = 1}, 1, 9, FLAGS },
     { NULL }
 };
 
@@ -202,6 +211,15 @@ static int init_supported_features(VdpauContext *s) {
         s->features[s->feature_cnt++] = VDP_VIDEO_MIXER_FEATURE_DEINTERLACE_TEMPORAL_SPATIAL;
     }
 
+    if (s->size_str != NULL) {
+        int scaling = VDP_VIDEO_MIXER_FEATURE_HIGH_QUALITY_SCALING_L1 + s->scaling_quality - 1;
+        ret = check_support(s, scaling, "high quality scaling");
+        if (ret < 0) {
+            return ret;
+        }
+        s->features[s->feature_cnt++] = scaling;
+    }
+
     return 0;
 }
 
@@ -220,6 +238,19 @@ static av_cold int init(AVFilterContext *ctx)
     s->device  = 0;
     s->mixer   = 0;
     s->feature_cnt = 0;
+
+    //parse scaling options
+    if (s->size_str) {
+        char buf[32];
+        if ((ret = av_parse_video_size(&s->w, &s->h, s->size_str)) < 0) {
+            av_log(ctx, AV_LOG_ERROR, "Invalid size '%s'\n", s->size_str);
+            return ret;
+        }
+        snprintf(buf, sizeof(buf)-1, "%d", s->w);
+        av_opt_set(s, "w", buf, 0);
+        snprintf(buf, sizeof(buf)-1, "%d", s->h);
+        av_opt_set(s, "h", buf, 0);
+    }
 
     //open display
     s->display = XOpenDisplay(0);
@@ -371,7 +402,7 @@ static int config_input(AVFilterLink *inlink)
         return -1;
     }
 
-    ret = vdpauFuncs->vdpOutputSurfaceCreate(s->device, VDP_RGBA_FORMAT_B8G8R8A8, inlink->w, inlink->h, &s->outputSurface);
+    ret = vdpauFuncs->vdpOutputSurfaceCreate(s->device, VDP_RGBA_FORMAT_B8G8R8A8, s->w, s->h, &s->outputSurface);
     if (ret != VDP_STATUS_OK) {
         av_log(ctx, AV_LOG_ERROR, "VDPAU output surface create on X11 display %s failed: %s\n",
                 s->display_name, vdpauFuncs->vdpGetErrorString(ret));
@@ -407,6 +438,11 @@ static int config_output(AVFilterLink *outlink)
         outlink->time_base.den = ctx->inputs[0]->time_base.den * 2;
 
         outlink->frame_rate = av_mul_q(ctx->inputs[0]->frame_rate, (AVRational){2, 1});
+    }
+
+    if (s->size_str != NULL) {
+        outlink->w = s->w;
+        outlink->h = s->h;
     }
 
 
