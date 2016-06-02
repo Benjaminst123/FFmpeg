@@ -35,6 +35,7 @@
 #include "libavutil/hwcontext.h"
 #include "libavutil/hwcontext_vdpau.h"
 #include "libavutil/parseutils.h"
+#include "libavutil/eval.h"
 #include "avfilter.h"
 #include "formats.h"
 #include "internal.h"
@@ -46,6 +47,32 @@
 
 #define MAX_SUPPORTED_FEATURES 4
 #define MAX_SUPPORTED_ATTRIBUTES 4
+
+enum var_name {
+    VAR_IN_W,   VAR_IW,
+    VAR_IN_H,   VAR_IH,
+    VAR_OUT_W,  VAR_OW,
+    VAR_OUT_H,  VAR_OH,
+    VAR_A,
+    VAR_SAR,
+    VAR_DAR,
+    VAR_HSUB,
+    VAR_VSUB,
+    VARS_NB
+};
+
+static const char *const var_names[] = {
+    "in_w",   "iw",
+    "in_h",   "ih",
+    "out_w",  "ow",
+    "out_h",  "oh",
+    "a",
+    "sar",
+    "dar",
+    "hsub",
+    "vsub",
+    NULL
+};
 
 enum DeinterlaceMethode {
     NONE,
@@ -119,11 +146,14 @@ typedef struct {
     int deinterlacer;
     int double_framerate;
 
-    int scaling_quality;
     int w;
     int h;
 
-    char* size_str;
+    char *size_str;
+    char *w_expr;
+    char *h_expr;
+    int force_original_aspect_ratio;
+    int scaling_quality;
 
     FFFrameSync fs;
     int use_overlay;
@@ -142,8 +172,13 @@ static const AVOption vdpau_options[] = {
         {"temporal", "temporal deinterlacer", 0, AV_OPT_TYPE_CONST, {.i64=TEMPORAL}, 0, 0, FLAGS, "deinterlacer"},
         {"temporal_spatial", "temporal spatial deinterlacer", 0, AV_OPT_TYPE_CONST, {.i64=TEMPORAL_SPATIAL}, 0, 0, FLAGS, "deinterlacer"},
     { "double_framerate", "double framerate", OFFSET(double_framerate), AV_OPT_TYPE_INT, {.i64 = 0}, 0, 1, FLAGS },
-    { "size","set video size", OFFSET(size_str), AV_OPT_TYPE_STRING, {.str = NULL}, 0, FLAGS },
+    { "w",     "Output video width",          OFFSET(w_expr),    AV_OPT_TYPE_STRING,        .flags = FLAGS },
+    { "width", "Output video width",          OFFSET(w_expr),    AV_OPT_TYPE_STRING,        .flags = FLAGS },
+    { "h",     "Output video height",         OFFSET(h_expr),    AV_OPT_TYPE_STRING,        .flags = FLAGS },
+    { "height","Output video height",         OFFSET(h_expr),    AV_OPT_TYPE_STRING,        .flags = FLAGS },
+    { "size",   "set video size",          OFFSET(size_str), AV_OPT_TYPE_STRING, {.str = NULL}, 0, FLAGS },
     { "scaling_quality", "set scaling quality", OFFSET(scaling_quality), AV_OPT_TYPE_INT, {.i64 = 1}, 1, 9, FLAGS },
+    { "force_original_aspect_ratio", "decrease or increase w/h if necessary to keep the original AR", OFFSET(force_original_aspect_ratio), AV_OPT_TYPE_INT, { .i64 = 0}, 0, 2, FLAGS, "force_oar" },
     { "overlay_x", "set overlay x", OFFSET(overlay_x), AV_OPT_TYPE_INT, {.i64=-1}, -1, 8000, FLAGS },
     { "overlay_y", "set overlay x", OFFSET(overlay_y), AV_OPT_TYPE_INT, {.i64=-1}, -1, 8000, FLAGS },
     { NULL }
@@ -309,6 +344,43 @@ static int config_overlay_input(AVFilterLink *inlink)
     return 0;
 }
 
+static av_cold int init_scaling(AVFilterContext *ctx)
+{
+    VdpauContext *s = ctx->priv;
+    int ret;
+
+    if (s->size_str && (s->w_expr || s->h_expr)) {
+        av_log(ctx, AV_LOG_ERROR,
+               "Size and width/height expressions cannot be set at the same time.\n");
+            return AVERROR(EINVAL);
+    }
+
+    if (s->w_expr && !s->h_expr)
+        FFSWAP(char *, s->w_expr, s->size_str);
+
+    if (s->size_str) {
+        char buf[32];
+        if ((ret = av_parse_video_size(&s->w, &s->h, s->size_str)) < 0) {
+            av_log(ctx, AV_LOG_ERROR,
+                   "Invalid size '%s'\n", s->size_str);
+            return ret;
+        }
+        snprintf(buf, sizeof(buf)-1, "%d", s->w);
+        av_opt_set(s, "w", buf, 0);
+        snprintf(buf, sizeof(buf)-1, "%d", s->h);
+        av_opt_set(s, "h", buf, 0);
+    }
+    if (!s->w_expr)
+        av_opt_set(s, "w", "iw", 0);
+    if (!s->h_expr)
+        av_opt_set(s, "h", "ih", 0);
+
+    av_log(ctx, AV_LOG_VERBOSE, "w:%s h:%s\n",
+           s->w_expr, s->h_expr);
+
+    return 0;
+}
+
 static av_cold int init(AVFilterContext *ctx)
 {
     VdpauContext *s = ctx->priv;
@@ -409,6 +481,11 @@ static av_cold int init(AVFilterContext *ctx)
     }
     for (i = 0; i < MAX_PAST_FRAMES; i++) {
         s->past_frames[i] = NULL;
+    }
+
+    //handle scaling if enabled
+    if (s->w_expr != NULL || s->h_expr != NULL || s->size_str != NULL) {
+        init_scaling(ctx);
     }
 
     //check overlay
@@ -534,6 +611,109 @@ static int config_input(AVFilterLink *inlink)
     return 0;
 }
 
+static int config_scaling(AVFilterLink *outlink, int *width, int *height)
+{
+    AVFilterContext *ctx = outlink->src;
+    VdpauContext *s = ctx->priv;
+    const AVFilterLink *inlink = ctx->inputs[0];
+    const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(inlink->format);
+    char *expr;
+    int ret;
+    int factor_w, factor_h;
+    double var_values[VARS_NB], res;
+    int64_t w, h;
+
+    var_values[VAR_IN_W]  = var_values[VAR_IW] = inlink->w;
+    var_values[VAR_IN_H]  = var_values[VAR_IH] = inlink->h;
+    var_values[VAR_OUT_W] = var_values[VAR_OW] = NAN;
+    var_values[VAR_OUT_H] = var_values[VAR_OH] = NAN;
+    var_values[VAR_A]     = (double) inlink->w / inlink->h;
+    var_values[VAR_SAR]   = inlink->sample_aspect_ratio.num ?
+        (double) inlink->sample_aspect_ratio.num / inlink->sample_aspect_ratio.den : 1;
+    var_values[VAR_DAR]   = var_values[VAR_A] * var_values[VAR_SAR];
+    var_values[VAR_HSUB]  = 1 << desc->log2_chroma_w;
+    var_values[VAR_VSUB]  = 1 << desc->log2_chroma_h;
+
+    /* evaluate width and height */
+      av_expr_parse_and_eval(&res, (expr = s->w_expr),
+                             var_names, var_values,
+                             NULL, NULL, NULL, NULL, NULL, 0, ctx);
+      s->w = var_values[VAR_OUT_W] = var_values[VAR_OW] = res;
+      if ((ret = av_expr_parse_and_eval(&res, (expr = s->h_expr),
+                                        var_names, var_values,
+                                        NULL, NULL, NULL, NULL, NULL, 0, ctx)) < 0)
+          goto fail;
+      s->h = var_values[VAR_OUT_H] = var_values[VAR_OH] = res;
+      /* evaluate again the width, as it may depend on the output height */
+      if ((ret = av_expr_parse_and_eval(&res, (expr = s->w_expr),
+                                        var_names, var_values,
+                                        NULL, NULL, NULL, NULL, NULL, 0, ctx)) < 0)
+          goto fail;
+      s->w = res;
+
+      w = s->w;
+      h = s->h;
+
+      /* Check if it is requested that the result has to be divisible by a some
+       * factor (w or h = -n with n being the factor). */
+      factor_w = 1;
+      factor_h = 1;
+      if (w < -1) {
+          factor_w = -w;
+      }
+      if (h < -1) {
+          factor_h = -h;
+      }
+
+      if (w < 0 && h < 0)
+          s->w = s->h = 0;
+
+      if (!(w = s->w))
+          w = inlink->w;
+      if (!(h = s->h))
+          h = inlink->h;
+
+      /* Make sure that the result is divisible by the factor we determined
+       * earlier. If no factor was set, it is nothing will happen as the default
+       * factor is 1 */
+      if (w < 0)
+          w = av_rescale(h, inlink->w, inlink->h * factor_w) * factor_w;
+      if (h < 0)
+          h = av_rescale(w, inlink->h, inlink->w * factor_h) * factor_h;
+
+      /* Note that force_original_aspect_ratio may overwrite the previous set
+       * dimensions so that it is not divisible by the set factors anymore. */
+      if (s->force_original_aspect_ratio) {
+          int tmp_w = av_rescale(h, inlink->w, inlink->h);
+          int tmp_h = av_rescale(w, inlink->h, inlink->w);
+
+          if (s->force_original_aspect_ratio == 1) {
+               w = FFMIN(tmp_w, w);
+               h = FFMIN(tmp_h, h);
+          } else {
+               w = FFMAX(tmp_w, w);
+               h = FFMAX(tmp_h, h);
+          }
+      }
+
+      if (w > INT_MAX || h > INT_MAX ||
+          (h * inlink->w) > INT_MAX  ||
+          (w * inlink->h) > INT_MAX)
+          av_log(ctx, AV_LOG_ERROR, "Rescaled value for width or height is too big.\n");
+
+      *width = (int)w;
+      *height = (int)h;
+
+      return 0;
+
+ fail:
+      av_log(ctx, AV_LOG_ERROR,
+             "Error when evaluating the expression '%s'.\n"
+             "Maybe the expression for out_w:'%s' or for out_h:'%s' is self-referencing.\n",
+             expr, s->w_expr, s->h_expr);
+      return ret;
+}
+
 static int config_output(AVFilterLink *outlink)
 {
     AVFilterContext *ctx = outlink->src;
@@ -562,11 +742,16 @@ static int config_output(AVFilterLink *outlink)
         outlink->frame_rate = av_mul_q(ctx->inputs[0]->frame_rate, (AVRational){2, 1});
     }
 
-    if (s->size_str == NULL) {
+
+    //handle scaling
+    if (s->size_str != NULL || s->w_expr != NULL || s->h_expr != NULL) {
+        if ((ret = config_scaling(outlink, &s->w, &s->h)) < 0) {
+            return ret;
+        }
+    } else {
         s->w = inlink->w;
         s->h = inlink->h;
     }
-
     outlink->w = s->w;
     outlink->h = s->h;
 
