@@ -74,11 +74,45 @@ static const char *const var_names[] = {
     NULL
 };
 
+static const char *const var_names_overlay[] = {
+    "main_w",    "W", ///< width  of the main    video
+    "main_h",    "H", ///< height of the main    video
+    "overlay_w", "w", ///< width  of the overlay video
+    "overlay_h", "h", ///< height of the overlay video
+    "hsub",
+    "vsub",
+    "x1",
+    "y1",
+    "x2",
+    "y2",
+    NULL
+};
+
+enum var_name_overlay {
+    OVERLAY_VAR_MAIN_W,    OVERLAY_VAR_MW,
+    OVERLAY_VAR_MAIN_H,    OVERLAY_VAR_MH,
+    OVERLAY_VAR_OVERLAY_W, OVERLAY_VAR_OW,
+    OVERLAY_VAR_OVERLAY_H, OVERLAY_VAR_OH,
+    OVERLAY_VAR_HSUB,
+    OVERLAY_VAR_VSUB,
+    OVERLAY_VAR_X1,
+    OVERLAY_VAR_Y1,
+    OVERLAY_VAR_X2,
+    OVERLAY_VAR_Y2,
+    OVERLAY_VAR_VARS_NB
+};
+
 enum DeinterlaceMethode {
     NONE,
     BOB,
     TEMPORAL,
     TEMPORAL_SPATIAL
+};
+
+enum EOFAction {
+    EOF_ACTION_REPEAT,
+    EOF_ACTION_ENDALL,
+    EOF_ACTION_PASS
 };
 
 typedef struct {
@@ -155,10 +189,20 @@ typedef struct {
     int force_original_aspect_ratio;
     int scaling_quality;
 
+    //overlay parameters
     FFFrameSync fs;
     int use_overlay;
-    int overlay_x;
-    int overlay_y;
+    int eof_action;
+    char *x1_expr;
+    char *y1_expr;
+    char *x2_expr;
+    char *y2_expr;
+    int x1;
+    int y1;
+    int x2;
+    int y2;
+    int shortest;
+    int repeatlast;
 } VdpauContext;
 
 #define OFFSET(x) offsetof(VdpauContext, x)
@@ -179,8 +223,18 @@ static const AVOption vdpau_options[] = {
     { "size",   "set video size",          OFFSET(size_str), AV_OPT_TYPE_STRING, {.str = NULL}, 0, FLAGS },
     { "scaling_quality", "set scaling quality", OFFSET(scaling_quality), AV_OPT_TYPE_INT, {.i64 = 1}, 1, 9, FLAGS },
     { "force_original_aspect_ratio", "decrease or increase w/h if necessary to keep the original AR", OFFSET(force_original_aspect_ratio), AV_OPT_TYPE_INT, { .i64 = 0}, 0, 2, FLAGS, "force_oar" },
-    { "overlay_x", "set overlay x", OFFSET(overlay_x), AV_OPT_TYPE_INT, {.i64=-1}, -1, 8000, FLAGS },
-    { "overlay_y", "set overlay x", OFFSET(overlay_y), AV_OPT_TYPE_INT, {.i64=-1}, -1, 8000, FLAGS },
+    { "x1", "set the x expression", OFFSET(x1_expr), AV_OPT_TYPE_STRING, {.str = "0"}, CHAR_MIN, CHAR_MAX, FLAGS },
+    { "y1", "set the y expression", OFFSET(y1_expr), AV_OPT_TYPE_STRING, {.str = "0"}, CHAR_MIN, CHAR_MAX, FLAGS },
+    { "x2", "set the x expression", OFFSET(x2_expr), AV_OPT_TYPE_STRING, {.str = "0"}, CHAR_MIN, CHAR_MAX, FLAGS },
+    { "y2", "set the y expression", OFFSET(y2_expr), AV_OPT_TYPE_STRING, {.str = "0"}, CHAR_MIN, CHAR_MAX, FLAGS },
+    { "eof_action", "Action to take when encountering EOF from secondary input ",
+        OFFSET(eof_action), AV_OPT_TYPE_INT, { .i64 = EOF_ACTION_REPEAT },
+        EOF_ACTION_REPEAT, EOF_ACTION_PASS, .flags = FLAGS, "eof_action" },
+        { "repeat", "Repeat the previous frame.",   0, AV_OPT_TYPE_CONST, { .i64 = EOF_ACTION_REPEAT }, .flags = FLAGS, "eof_action" },
+        { "endall", "End both streams.",            0, AV_OPT_TYPE_CONST, { .i64 = EOF_ACTION_ENDALL }, .flags = FLAGS, "eof_action" },
+        { "pass",   "Pass through the main input.", 0, AV_OPT_TYPE_CONST, { .i64 = EOF_ACTION_PASS },   .flags = FLAGS, "eof_action" },
+    { "shortest", "force termination when the shortest input terminates", OFFSET(shortest), AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, FLAGS },
+    { "repeatlast", "repeat overlay of the last overlay frame", OFFSET(repeatlast), AV_OPT_TYPE_BOOL, {.i64=1}, 0, 1, FLAGS },
     { NULL }
 };
 
@@ -332,14 +386,63 @@ static int config_overlay_input(AVFilterLink *inlink)
     AVFilterContext *ctx = inlink->dst;
     VdpauContext *s = inlink->dst->priv;
     VdpauFunctions *vdpauFuncs = &s->vdpaufuncs;
-    VdpStatus ret;
+    VdpStatus status;
+    int ret;
+    const AVPixFmtDescriptor *pix_desc = av_pix_fmt_desc_get(inlink->format);
+    double var_values[OVERLAY_VAR_VARS_NB];
+    double res;
 
-    ret = vdpauFuncs->vdpOutputSurfaceCreate(s->device, VDP_RGBA_FORMAT_B8G8R8A8, inlink->w, inlink->h, &s->overlaySurface);
-    if (ret != VDP_STATUS_OK) {
+    status = vdpauFuncs->vdpOutputSurfaceCreate(s->device, VDP_RGBA_FORMAT_B8G8R8A8, inlink->w, inlink->h, &s->overlaySurface);
+    if (status != VDP_STATUS_OK) {
         av_log(ctx, AV_LOG_ERROR, "VDPAU overlay surface create on X11 display %s failed: %s\n",
-                s->display_name, vdpauFuncs->vdpGetErrorString(ret));
+                s->display_name, vdpauFuncs->vdpGetErrorString(status));
         return -1;
     }
+
+    /* Finish the configuration by evaluating the expressions
+       now when both inputs are configured. */
+    var_values[OVERLAY_VAR_MAIN_W] = var_values[OVERLAY_VAR_MW] = ctx->inputs[0]->w;
+    var_values[OVERLAY_VAR_MAIN_H] = var_values[OVERLAY_VAR_MH] = ctx->inputs[0]->h;
+    var_values[OVERLAY_VAR_OVERLAY_W] = var_values[OVERLAY_VAR_OW] = inlink->w;
+    var_values[OVERLAY_VAR_OVERLAY_H] = var_values[OVERLAY_VAR_OH] = inlink->h;
+    var_values[OVERLAY_VAR_HSUB] = 1<<pix_desc->log2_chroma_w;
+    var_values[OVERLAY_VAR_VSUB] = 1<<pix_desc->log2_chroma_h;
+    var_values[OVERLAY_VAR_X1] = NAN;
+    var_values[OVERLAY_VAR_Y1] = NAN;
+    var_values[OVERLAY_VAR_X2] = NAN;
+    var_values[OVERLAY_VAR_Y2] = NAN;
+
+    ret = av_expr_parse_and_eval(&res, s->x1_expr,
+                           var_names_overlay, var_values,
+                           NULL, NULL, NULL, NULL, NULL, 0, ctx);
+    if (ret < 0) return ret;
+    var_values[OVERLAY_VAR_X1] = res;
+
+    ret = av_expr_parse_and_eval(&res, s->y1_expr,
+                           var_names_overlay, var_values,
+                           NULL, NULL, NULL, NULL, NULL, 0, ctx);
+    if (ret < 0) return ret;
+    var_values[OVERLAY_VAR_Y1] = res;
+
+    ret = av_expr_parse_and_eval(&res, s->x2_expr,
+                           var_names_overlay, var_values,
+                           NULL, NULL, NULL, NULL, NULL, 0, ctx);
+    if (ret < 0) return ret;
+    var_values[OVERLAY_VAR_X2] = res;
+
+    ret = av_expr_parse_and_eval(&res, s->y2_expr,
+                           var_names_overlay, var_values,
+                           NULL, NULL, NULL, NULL, NULL, 0, ctx);
+    if (ret < 0) return ret;
+    var_values[OVERLAY_VAR_Y2] = res;
+
+    s->x1 = (int)var_values[OVERLAY_VAR_X1];
+    s->y1 = (int)var_values[OVERLAY_VAR_Y1];
+    s->x2 = (int)var_values[OVERLAY_VAR_X2];
+    s->y2 = (int)var_values[OVERLAY_VAR_Y2];
+
+    av_log(ctx, AV_LOG_VERBOSE, "Overlay position: x1:%d y1:%d x2:%d y2:%d\n",
+            s->x1, s->y1, s->x2, s->y2);
 
     return 0;
 }
@@ -488,14 +591,8 @@ static av_cold int init(AVFilterContext *ctx)
         init_scaling(ctx);
     }
 
-    //check overlay
-    if ((s->overlay_x >= 0 && s->overlay_y < 0) || (s->overlay_x < 0 && s->overlay_y >= 0)) {
-        av_log(ctx, AV_LOG_ERROR, "Invalid overlay coordinates!\n");
-        return AVERROR(EINVAL);
-    }
-
     s->use_overlay = 0;
-    if (s->overlay_x >= 0) {
+    if (s->x1_expr != NULL || s->y1_expr != NULL || s->x2_expr != NULL || s->y2_expr != NULL) {
         //initialize overlay_input pad
         AVFilterPad overlay_pad = {
             .name          = "overlay",
@@ -507,6 +604,11 @@ static av_cold int init(AVFilterContext *ctx)
         if ((ret = ff_insert_inpad(ctx, 0, &overlay_pad)) < 0) {
             return ret;
         }
+
+        if (!s->x2_expr)
+            av_opt_set(s, "x2_expr", "x1+overlay_w", 0);
+        if (!s->y2_expr)
+            av_opt_set(s, "y2_expr", "y1+overlay_h", 0);
 
         s->use_overlay = 1;
     }
@@ -970,7 +1072,7 @@ static int filter_frame_vdpau(AVFilterLink *inlink, AVFrame *frame, AVFrame *ove
             return ret;
         }
 
-        overlay_rect = (VdpRect){ 0, 0, s->w / 4, s->h / 4};
+        overlay_rect = (VdpRect){ s->x1, s->y1, s->x2, s->y2};
 
         overlay_layer.struct_version = VDP_LAYER_VERSION;
         overlay_layer.source_surface = s->overlaySurface;
