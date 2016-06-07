@@ -166,9 +166,11 @@ typedef struct {
     int feature_cnt;
 
     AVFrame *cur_frame;
+    AVFrame *cur_overlay_frame;
 
     int future_frames_cnt;
     AVFrame *future_frames[MAX_FUTURE_FRAMES];
+    AVFrame *future_overlay_frames[MAX_FUTURE_FRAMES];
 
     int past_frames_cnt;
     AVFrame *past_frames[MAX_PAST_FRAMES];
@@ -332,8 +334,9 @@ static int process_frame(FFFrameSync *fs) {
     int ret = 0;
 
     if ((ret = ff_framesync_get_frame(&s->fs, 0, &mainpic,   1)) < 0 ||
-        (ret = ff_framesync_get_frame(&s->fs, 1, &secondpic, 0)) < 0) {
+        (ret = ff_framesync_get_frame(&s->fs, 1, &secondpic, 1)) < 0) {
         av_frame_free(&mainpic);
+        av_frame_free(&secondpic);
         return ret;
     }
     av_assert0(mainpic);
@@ -859,7 +862,7 @@ static int config_output(AVFilterLink *outlink)
 
 
     if (s->use_overlay) {
-        if ((ret = init_framesync(ctx, 1, 1)) < 0) {
+        if ((ret = init_framesync(ctx, s->repeatlast, s->shortest)) < 0) {
             return ret;
         }
     }
@@ -935,6 +938,23 @@ static void update_frames(VdpauContext *s, AVFrame* newFrame)
         s->future_frames[i - 1] = s->future_frames[i];
     }
     s->future_frames[MAX_FUTURE_FRAMES - 1] = newFrame;
+}
+
+static void update_overlay_frames(VdpauContext *s, AVFrame *newFrame)
+{
+    int i;
+
+    if (s->cur_overlay_frame != NULL) {
+        av_frame_free(&s->cur_overlay_frame);
+    }
+
+    s->cur_overlay_frame = s->future_overlay_frames[0];
+
+    //update future frames
+    for (i = 1; i < MAX_FUTURE_FRAMES; i++) {
+        s->future_overlay_frames[i - 1] = s->future_overlay_frames[i];
+    }
+    s->future_overlay_frames[MAX_FUTURE_FRAMES - 1] = newFrame;
 }
 
 static void setup_past_surfaces(VdpVideoSurface pastVideoSurfaces[], AVFrame *past_frames[])
@@ -1050,6 +1070,10 @@ static int filter_frame_vdpau(AVFilterLink *inlink, AVFrame *frame, AVFrame *ove
     }
 
     update_frames(s, iFrame);
+    if (s->use_overlay) {
+        update_overlay_frames(s, overlay);
+    }
+
     if (s->cur_frame == NULL) {
         return 0;
     }
@@ -1065,8 +1089,8 @@ static int filter_frame_vdpau(AVFilterLink *inlink, AVFrame *frame, AVFrame *ove
     }
 
     //handle overlay
-    if (overlay != NULL) {
-        ret = upload_frame_outputsurface(s, overlay, s->overlaySurface);
+    if (s->use_overlay) {
+        ret = upload_frame_outputsurface(s, s->cur_overlay_frame, s->overlaySurface);
         //av_frame_free(&overlay);
         if (ret < 0) {
             return ret;
