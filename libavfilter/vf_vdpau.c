@@ -42,8 +42,8 @@
 #include "video.h"
 #include "framesync.h"
 
-#define MAX_FUTURE_FRAMES 3
-#define MAX_PAST_FRAMES 3
+#define MAX_FUTURE_FRAMES 5
+#define MAX_PAST_FRAMES 5
 
 #define MAX_SUPPORTED_FEATURES 4
 #define MAX_SUPPORTED_ATTRIBUTES 4
@@ -211,6 +211,8 @@ typedef struct {
 #define FLAGS AV_OPT_FLAG_FILTERING_PARAM|AV_OPT_FLAG_VIDEO_PARAM
 
 static const AVOption vdpau_options[] = {
+    { "future_frame_number", "set number of future frames ", OFFSET(future_frames_cnt),   AV_OPT_TYPE_INT, {.i64 = 1}, 0, MAX_FUTURE_FRAMES, FLAGS },
+    { "past_frame_number", "set number of future frames ", OFFSET(past_frames_cnt),   AV_OPT_TYPE_INT, {.i64 = 1}, 0, MAX_PAST_FRAMES, FLAGS },
     { "noise_reduction", "set interlacing threshold", OFFSET(noise_reduction),   AV_OPT_TYPE_FLOAT, {.dbl = 0}, 0, 1.0, FLAGS },
     { "sharpness", "set progressive threshold", OFFSET(sharpness), AV_OPT_TYPE_FLOAT, {.dbl = 0},  -1, 1, FLAGS },
     { "deinterlacer", "set deinterlacing methode", OFFSET(deinterlacer), AV_OPT_TYPE_INT, {.i64 = 0},  0, TEMPORAL_SPATIAL, FLAGS, "deinterlacer"},
@@ -1002,10 +1004,10 @@ static int render_frame(AVFilterContext *ctx,
                                           VDP_INVALID_HANDLE,
                                           NULL,
                                           picture_structure,
-                                          MAX_PAST_FRAMES,
+                                          s->past_frames_cnt,
                                           past,
                                           cur,
-                                          MAX_FUTURE_FRAMES,
+                                          s->future_frames_cnt,
                                           future,
                                           NULL,
                                           out,
