@@ -227,10 +227,10 @@ static const AVOption vdpau_options[] = {
     { "size",   "set video size",          OFFSET(size_str), AV_OPT_TYPE_STRING, {.str = NULL}, 0, FLAGS },
     { "scaling_quality", "set scaling quality", OFFSET(scaling_quality), AV_OPT_TYPE_INT, {.i64 = 1}, 1, 9, FLAGS },
     { "force_original_aspect_ratio", "decrease or increase w/h if necessary to keep the original AR", OFFSET(force_original_aspect_ratio), AV_OPT_TYPE_INT, { .i64 = 0}, 0, 2, FLAGS, "force_oar" },
-    { "x1", "set the x expression", OFFSET(x1_expr), AV_OPT_TYPE_STRING, {.str = "0"}, CHAR_MIN, CHAR_MAX, FLAGS },
-    { "y1", "set the y expression", OFFSET(y1_expr), AV_OPT_TYPE_STRING, {.str = "0"}, CHAR_MIN, CHAR_MAX, FLAGS },
-    { "x2", "set the x expression", OFFSET(x2_expr), AV_OPT_TYPE_STRING, {.str = "0"}, CHAR_MIN, CHAR_MAX, FLAGS },
-    { "y2", "set the y expression", OFFSET(y2_expr), AV_OPT_TYPE_STRING, {.str = "0"}, CHAR_MIN, CHAR_MAX, FLAGS },
+    { "x1", "set the x expression", OFFSET(x1_expr), AV_OPT_TYPE_STRING, .flags=FLAGS },
+    { "y1", "set the y expression", OFFSET(y1_expr), AV_OPT_TYPE_STRING, .flags=FLAGS },
+    { "x2", "set the x expression", OFFSET(x2_expr), AV_OPT_TYPE_STRING, .flags=FLAGS },
+    { "y2", "set the y expression", OFFSET(y2_expr), AV_OPT_TYPE_STRING, .flags=FLAGS },
     { "eof_action", "Action to take when encountering EOF from secondary input ",
         OFFSET(eof_action), AV_OPT_TYPE_INT, { .i64 = EOF_ACTION_REPEAT },
         EOF_ACTION_REPEAT, EOF_ACTION_PASS, .flags = FLAGS, "eof_action" },
@@ -554,6 +554,11 @@ static av_cold int init(AVFilterContext *ctx)
     if (ret < 0)
         return ret;
 
+    //av_buffer_unref(&s->hwframe);
+    s->hwframe = av_hwframe_ctx_alloc(s->hwdevice);
+    if (!s->hwframe)
+        return AVERROR(ENOMEM);
+
     //retrieve needed vdpau function pointer
     GET_CALLBACK(VDP_FUNC_ID_VIDEO_MIXER_CREATE, vdpauFuncs->vdpVideoMixerCreate);
     GET_CALLBACK(VDP_FUNC_ID_VIDEO_MIXER_SET_FEATURE_ENABLES, vdpauFuncs->vdpVideoMixerSetFeatureEnables);
@@ -830,11 +835,6 @@ static int config_output(AVFilterLink *outlink)
 
     AVHWFramesContext *hwframe_ctx;
     int ret;
-
-    av_buffer_unref(&s->hwframe);
-    s->hwframe = av_hwframe_ctx_alloc(s->hwdevice);
-    if (!s->hwframe)
-        return AVERROR(ENOMEM);
 
     hwframe_ctx            = (AVHWFramesContext*)s->hwframe->data;
     hwframe_ctx->format    = AV_PIX_FMT_VDPAU;
