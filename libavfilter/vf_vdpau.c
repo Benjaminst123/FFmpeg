@@ -133,6 +133,7 @@ typedef struct {
     VdpVideoSurfacePutBitsYCbCr *vdpVideoSurfacePutBitsYCbCr;
     VdpOutputSurfaceGetBitsNative *vdpOutputSurfaceGetBitsNative;
     VdpOutputSurfacePutBitsNative *vdpOutputSurfacePutBitsNative;
+    VdpOutputSurfaceQueryGetPutBitsNativeCapabilities *VdpOutputSurfaceQueryGetPutBitsNativeCapabilities;
 
     VdpVideoMixerDestroy *vdpVideoMixerDestroy;
     VdpVideoMixerRender *vdpVideoMixerRender;
@@ -577,6 +578,7 @@ static av_cold int init(AVFilterContext *ctx)
     GET_CALLBACK(VDP_FUNC_ID_GET_ERROR_STRING, vdpauFuncs->vdpGetErrorString);
     GET_CALLBACK(VDP_FUNC_ID_VIDEO_MIXER_SET_ATTRIBUTE_VALUES, vdpauFuncs->vdpVideoMixerSetAttributeValues);
     GET_CALLBACK(VDP_FUNC_ID_VIDEO_MIXER_QUERY_FEATURE_SUPPORT, vdpauFuncs->vdpVideoMixerQueryFeatureSupport);
+    GET_CALLBACK(VDP_FUNC_ID_OUTPUT_SURFACE_QUERY_GET_PUT_BITS_NATIVE_CAPABILITIES, vdpauFuncs->VdpOutputSurfaceQueryGetPutBitsNativeCapabilities);
 
     //Check if features selected are supported
     ret = init_supported_features(s);
@@ -626,6 +628,41 @@ static av_cold int init(AVFilterContext *ctx)
     return 0;
 }
 
+static int add_outputsurface_in_format(AVFilterContext *ctx, VdpRGBAFormat vdpFormat, int64_t format, AVFilterFormats **avff)
+{
+    VdpauContext *s = ctx->priv;
+    VdpauFunctions *f = &s->vdpaufuncs;
+    VdpBool supported;
+    VdpStatus status;
+    int ret;
+
+    status = f->VdpOutputSurfaceQueryGetPutBitsNativeCapabilities(s->device, vdpFormat, &supported);
+    if (status != VDP_STATUS_OK) {
+        return AVERROR_UNKNOWN;
+    }
+    if (supported) {
+        if ((ret = ff_add_format(avff, format)) < 0) {
+            return ret;
+        }
+    }
+
+    return 0;
+}
+
+static int add_supported_overlay_formats(AVFilterContext *ctx, AVFilterFormats **avff)
+{
+    int ret;
+
+    if ((ret = add_outputsurface_in_format(ctx, VDP_RGBA_FORMAT_R8G8B8A8, AV_PIX_FMT_RGBA, avff) < 0)) {
+        return ret;
+    }
+    if ((ret = add_outputsurface_in_format(ctx, VDP_RGBA_FORMAT_B8G8R8A8, AV_PIX_FMT_BGRA, avff) < 0)) {
+        return ret;
+    }
+
+    return 0;
+}
+
 static int query_formats(AVFilterContext *ctx)
 {
     VdpauContext *s = ctx->priv;
@@ -639,10 +676,6 @@ static int query_formats(AVFilterContext *ctx)
         AV_PIX_FMT_NONE
     };
     static const enum AVPixelFormat pix_fmts_out[] = {
-        AV_PIX_FMT_BGRA,
-        AV_PIX_FMT_NONE
-    };
-    static const enum AVPixelFormat pix_fmt_overlay_in[] = {
         AV_PIX_FMT_BGRA,
         AV_PIX_FMT_NONE
     };
@@ -661,10 +694,11 @@ static int query_formats(AVFilterContext *ctx)
 
     if (s->use_overlay) {
         AVFilterLink *inlink_overlay  = ctx->inputs[1];
-        if ((in_formats = ff_make_format_list(pix_fmt_overlay_in)) == 0) {
-            return AVERROR(ENOMEM);
+        AVFilterFormats *overlay_in_formats = NULL;
+        if ((ret = add_supported_overlay_formats(ctx, &overlay_in_formats)) < 0) {
+            return ret;
         }
-        if ((ret = ff_formats_ref(in_formats, &inlink_overlay->out_formats)) < 0) {
+        if ((ret = ff_formats_ref(overlay_in_formats, &inlink_overlay->out_formats)) < 0) {
             return ret;
         }
 
