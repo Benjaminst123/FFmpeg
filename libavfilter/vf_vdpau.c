@@ -206,7 +206,10 @@ typedef struct {
     float noise_reduction;
     float sharpness;
     int deinterlacer;
+
     int double_framerate;
+    AVRational ts_unit;
+    int64_t start_time;
 
     int w;
     int h;
@@ -521,6 +524,7 @@ static av_cold int init(AVFilterContext *ctx)
     s->device  = 0;
     s->mixer   = 0;
     s->feature_cnt = 0;
+    s->start_time = AV_NOPTS_VALUE;
 
     //parse scaling options
     if (s->size_str) {
@@ -933,13 +937,21 @@ static int config_output(AVFilterLink *outlink)
     hwframe_ctx->width     = /*FFALIGN(*/inlink->w;//, 16);
     hwframe_ctx->height    = /*FFALIGN(*/inlink->h;//, 16);
 
+    outlink->time_base = inlink->time_base;
+
     if (s->double_framerate) {
-        outlink->time_base.num = ctx->inputs[0]->time_base.num;
-        outlink->time_base.den = ctx->inputs[0]->time_base.den * 2;
+        AVRational fps = inlink->frame_rate;
+        if (!fps.num || !fps.den) {
+            av_log(ctx, AV_LOG_ERROR, "The input needs a constant frame rate; "
+                   "current rate of %d/%d is invalid\n", fps.num, fps.den);
+            return AVERROR(EINVAL);
+        }
 
-        outlink->frame_rate = av_mul_q(ctx->inputs[0]->frame_rate, (AVRational){2, 1});
+        fps = av_mul_q(fps, (AVRational){2, 1});
+        outlink->frame_rate = fps;
+
+        s->ts_unit = av_inv_q(av_mul_q(fps, outlink->time_base));
     }
-
 
     //handle scaling
     if (s->size_str != NULL || s->w_expr != NULL || s->h_expr != NULL) {
@@ -1234,7 +1246,8 @@ static int filter_frame_vdpau(AVFilterLink *inlink, AVFrame *frame, AVFrame *ove
 
 
     if (s->double_framerate) {
-        oFrame->pts *= 2;
+        oFrame->pts = ((s->start_time == AV_NOPTS_VALUE) ? 0 : s->start_time) +
+                      av_rescale(outlink->frame_count, s->ts_unit.num, s->ts_unit.den);
 
         if (picture_structure == VDP_VIDEO_MIXER_PICTURE_STRUCTURE_TOP_FIELD) {
             picture_structure = VDP_VIDEO_MIXER_PICTURE_STRUCTURE_BOTTOM_FIELD;
@@ -1252,11 +1265,8 @@ static int filter_frame_vdpau(AVFilterLink *inlink, AVFrame *frame, AVFrame *ove
         //download result to frame
         oFrame2 = ff_get_video_buffer(outlink, outlink->w, outlink->h);
         av_frame_copy_props(oFrame2, s->cur_frame);
-        if (s->future_frames[0] != NULL) {
-            oFrame2->pts += s->future_frames[0]->pts;
-        } else {
-            oFrame2->pts *= 2;
-        }
+        oFrame2->pts = ((s->start_time == AV_NOPTS_VALUE) ? 0 : s->start_time) +
+                       av_rescale(outlink->frame_count + 1, s->ts_unit.num, s->ts_unit.den);
 
         vdpauFuncs->vdpOutputSurfaceGetBitsNative(s->outputSurface, NULL, (void * const*)oFrame2->data, oFrame2->linesize);
         if (ret != VDP_STATUS_OK) {
