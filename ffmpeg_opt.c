@@ -457,6 +457,17 @@ static int opt_vaapi_device(void *optctx, const char *opt, const char *arg)
 }
 #endif
 
+#if CONFIG_VDPAU
+static int opt_vdpau_device(void *optctx, const char *opt, const char *arg)
+{
+    int err;
+    err = vdpau_device_init(arg);
+    if (err < 0)
+        exit_program(1);
+    return 0;
+}
+#endif
+
 /**
  * Parse a metadata specifier passed as 'arg' parameter.
  * @param arg  metadata string to parse
@@ -3482,5 +3493,9 @@ const OptionDef options[] = {
         "set VAAPI hardware device (DRM path or X11 display name)", "device" },
 #endif
 
+#if CONFIG_VDPAU
+        { "vdpau_device", HAS_ARG | OPT_EXPERT, { .func_arg = opt_vdpau_device },
+            "set VDPAU hardware device ( X11 display name)", "device" },
+#endif
     { NULL, },
 };

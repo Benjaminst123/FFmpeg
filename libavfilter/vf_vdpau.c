@@ -733,6 +733,7 @@ static int query_formats(AVFilterContext *ctx)
     AVFilterLink *inlink  = ctx->inputs[0];
     AVFilterLink *outlink = ctx->outputs[0];
     static const enum AVPixelFormat pix_fmts_in[] = {
+        AV_PIX_FMT_VDPAU,
         AV_PIX_FMT_YUV420P,
         AV_PIX_FMT_NONE
     };

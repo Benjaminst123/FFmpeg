@@ -578,6 +578,7 @@ int init_complex_filtergraph(FilterGraph *fg);
 int ffmpeg_parse_options(int argc, char **argv);
 
 int vdpau_init(AVCodecContext *s);
+int vdpau_device_init(const char *device);
 int dxva2_init(AVCodecContext *s);
 int vda_init(AVCodecContext *s);
 int videotoolbox_init(AVCodecContext *s);
