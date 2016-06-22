@@ -145,6 +145,8 @@ static int vdpau_alloc(AVCodecContext *s)
     if (!ctx->hw_frames_ctx)
         goto fail;
 
+    ist->hw_frames_ctx = av_buffer_ref(ctx->hw_frames_ctx);
+
     frames_ctx            = (AVHWFramesContext*)ctx->hw_frames_ctx->data;
     frames_ctx->format    = AV_PIX_FMT_VDPAU;
     frames_ctx->sw_format = s->sw_pix_fmt;
