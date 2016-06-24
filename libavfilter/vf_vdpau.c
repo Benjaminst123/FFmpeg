@@ -688,14 +688,21 @@ static int query_formats(AVFilterContext *ctx)
         AV_PIX_FMT_YUV420P,
         AV_PIX_FMT_NONE
     };
+    static const enum AVPixelFormat pix_fmt_overlay_in[] = {
+        AV_PIX_FMT_BGRA,
+        AV_PIX_FMT_NONE
+    };
+    static const enum AVPixelFormat pix_fmts_out[] = {
+        AV_PIX_FMT_BGRA,
+        AV_PIX_FMT_NONE
+    };
 
-    if ((in_formats = ff_make_format_list(pix_fmts_in)) == NULL) {
+    in_formats = ff_make_format_list(pix_fmts_in);
+    out_formats = ff_make_format_list(pix_fmts_out);
+    if (!in_formats || !out_formats) {
         return AVERROR(ENOMEM);
     }
 
-    if ((ret = add_supported_output_formats(ctx, &out_formats)) < 0) {
-        return ret;
-    }
 
     ret = ff_formats_ref(in_formats, &inlink->out_formats);
     if (ret < 0)
@@ -706,11 +713,10 @@ static int query_formats(AVFilterContext *ctx)
 
     if (s->use_overlay) {
         AVFilterLink *inlink_overlay  = ctx->inputs[1];
-        AVFilterFormats *overlay_in_formats = NULL;
-        if ((ret = add_supported_overlay_formats(ctx, &overlay_in_formats)) < 0) {
-            return ret;
+        if ((in_formats = ff_make_format_list(pix_fmt_overlay_in)) == 0) {
+            return AVERROR(ENOMEM);
         }
-        if ((ret = ff_formats_ref(overlay_in_formats, &inlink_overlay->out_formats)) < 0) {
+        if ((ret = ff_formats_ref(in_formats, &inlink_overlay->out_formats)) < 0) {
             return ret;
         }
 
