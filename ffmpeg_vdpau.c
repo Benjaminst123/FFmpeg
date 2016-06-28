@@ -86,6 +86,11 @@ static int vdpau_retrieve_data(AVCodecContext *s, AVFrame *frame)
     VDPAUContext       *ctx = ist->hwaccel_ctx;
     int ret;
 
+    if (ist->hwaccel_output_format == AV_PIX_FMT_VDPAU) {
+        //nothing to do
+        return 0;
+    }
+
     ret = av_hwframe_transfer_data(ctx->tmp_frame, frame, 0);
     if (ret < 0)
         return ret;
