@@ -178,6 +178,7 @@ typedef struct {
 
     AVBufferRef *hwdevice;
     AVBufferRef *hwframe;
+    AVBufferRef *output_hwframe;
 
     VdpVideoMixer mixer;
     VdpVideoSurface   videosSurface;
@@ -195,6 +196,7 @@ typedef struct {
     AVFrame *cur_overlay_frame;
 
     int in_format;
+    int overlay_format;
 
     int future_frames_cnt;
     AVFrame *future_frames[MAX_FUTURE_FRAMES];
@@ -690,6 +692,7 @@ static int query_formats(AVFilterContext *ctx)
     };
     static const enum AVPixelFormat pix_fmt_overlay_in[] = {
         AV_PIX_FMT_BGRA,
+        AV_PIX_FMT_VDPAU_OUTPUTSURFACE,
         AV_PIX_FMT_NONE
     };
     static const enum AVPixelFormat pix_fmts_out[] = {
@@ -947,6 +950,7 @@ static int config_output(AVFilterLink *outlink)
     VdpRGBAFormat surface_format;
 
     AVHWFramesContext *hwframe_ctx;
+    AVHWFramesContext *output_hwframe_ctx;
     int ret;
 
     if (inlink->format != AV_PIX_FMT_VDPAU) {
@@ -966,6 +970,12 @@ static int config_output(AVFilterLink *outlink)
     } else {
         av_assert0(inlink->hw_frames_ctx != 0);
         s->hwframe = av_buffer_ref(inlink->hw_frames_ctx);
+    }
+
+    //create hardware frame ctx for output surfaces
+    s->output_hwframe = av_hwframe_ctx_alloc(s->hwdevice);
+    if (!s->output_hwframe) {
+        return AVERROR(ENOMEM);
     }
 
     outlink->time_base = inlink->time_base;
@@ -995,6 +1005,16 @@ static int config_output(AVFilterLink *outlink)
     }
     outlink->w = s->w;
     outlink->h = s->h;
+
+    output_hwframe_ctx             = (AVHWFramesContext*)s->output_hwframe->data;
+    output_hwframe_ctx->format     = AV_PIX_FMT_VDPAU_OUTPUTSURFACE;
+    output_hwframe_ctx->sw_format  = AV_PIX_FMT_BGRA;
+    output_hwframe_ctx->width      = outlink->w;
+    output_hwframe_ctx->height     = outlink->h;
+
+    ret = av_hwframe_ctx_init(s->output_hwframe);
+    if (ret < 0)
+        return ret;
 
 
     if (s->use_overlay) {
@@ -1247,7 +1267,6 @@ static int filter_frame_vdpau(AVFilterLink *inlink, AVFrame *frame, AVFrame *ove
         }
 
         overlay_rect = (VdpRect){ s->x1, s->y1, s->x2, s->y2};
-
         overlay_layer.struct_version = VDP_LAYER_VERSION;
         overlay_layer.source_surface = s->overlaySurface;
         overlay_layer.source_rect    = NULL;
@@ -1257,22 +1276,35 @@ static int filter_frame_vdpau(AVFilterLink *inlink, AVFrame *frame, AVFrame *ove
         layer_count = 1;
     }
 
+    //get output surface frame
+    oFrame = av_frame_alloc();
+    ret =  av_hwframe_get_buffer(s->output_hwframe, oFrame, 0);
+    if (ret < 0) {
+        return ret;
+    }
+    av_frame_copy_props(oFrame, s->cur_frame);
+
     ret = render_frame(ctx, s->mixer, picture_structure, past_surfaces,
-            (VdpVideoSurface)s->cur_frame->data[3], future_surfaces, s->outputSurface, layer_count, layers);
+            (VdpVideoSurface)s->cur_frame->data[3], future_surfaces, (VdpOutputSurface)oFrame->data[3], layer_count, layers);
     if (ret < 0) {
         return ret;
     }
 
-    //download result to frame
-    oFrame = ff_get_video_buffer(outlink, outlink->w, outlink->h);
-    av_frame_copy_props(oFrame, s->cur_frame);
-    vdpauFuncs->vdpOutputSurfaceGetBitsNative(s->outputSurface, NULL, (void * const*)oFrame->data, oFrame->linesize);
-    if (ret != VDP_STATUS_OK) {
-        av_log(ctx, AV_LOG_ERROR, "VDPAU vdpOutputSurfaceGetBitsNative on X11 display failed: %s\n",
-               vdpauFuncs->vdpGetErrorString(ret));
-        return AVERROR_UNKNOWN;
-    }
+    if (outlink->format != AV_PIX_FMT_VDPAU_OUTPUTSURFACE) {
+        //download frame
+        AVFrame* o1 = av_frame_alloc();
+        if (o1 == NULL) {
+            return AVERROR(ENOMEM);
+        }
+        o1->format = outlink->format;
 
+        if ((ret = av_hwframe_transfer_data(o1, oFrame, 0)) < 0) {
+            return ret;
+        }
+        av_frame_free(&oFrame);
+        oFrame = o1;
+
+    }
 
     if (s->double_framerate) {
         oFrame->pts = ((s->start_time == AV_NOPTS_VALUE) ? 0 : s->start_time) +
@@ -1284,24 +1316,37 @@ static int filter_frame_vdpau(AVFilterLink *inlink, AVFrame *frame, AVFrame *ove
             picture_structure = VDP_VIDEO_MIXER_PICTURE_STRUCTURE_TOP_FIELD;
         }
 
-        ret = render_frame(ctx, s->mixer, picture_structure, past_surfaces,
-                (VdpVideoSurface)s->cur_frame->data[3], future_surfaces, s->outputSurface, layer_count, layers);
+        //get output surface frame
+        oFrame2 = av_frame_alloc();
+        ret =  av_hwframe_get_buffer(s->output_hwframe, oFrame2, 0);
         if (ret < 0) {
             return ret;
         }
-
-
-        //download result to frame
-        oFrame2 = ff_get_video_buffer(outlink, outlink->w, outlink->h);
         av_frame_copy_props(oFrame2, s->cur_frame);
+
+        ret = render_frame(ctx, s->mixer, picture_structure, past_surfaces,
+                (VdpVideoSurface)s->cur_frame->data[3], future_surfaces, (VdpOutputSurface)oFrame2->data[3], layer_count, layers);
+        if (ret < 0) {
+            return ret;
+        }
+        oFrame2 = ff_get_video_buffer(outlink, outlink->w, outlink->h);
         oFrame2->pts = ((s->start_time == AV_NOPTS_VALUE) ? 0 : s->start_time) +
                        av_rescale(outlink->frame_count + 1, s->ts_unit.num, s->ts_unit.den);
 
-        vdpauFuncs->vdpOutputSurfaceGetBitsNative(s->outputSurface, NULL, (void * const*)oFrame2->data, oFrame2->linesize);
-        if (ret != VDP_STATUS_OK) {
-            av_log(ctx, AV_LOG_ERROR, "VDPAU vdpOutputSurfaceGetBitsNative on X11 display failed: %s\n",
-                   vdpauFuncs->vdpGetErrorString(ret));
-            return AVERROR_UNKNOWN;
+
+        if (outlink->format != AV_PIX_FMT_VDPAU_OUTPUTSURFACE) {
+            //download frame
+            AVFrame* o2 = av_frame_alloc();
+            if (o2 == NULL) {
+                return AVERROR(ENOMEM);
+            }
+            o2->format = outlink->format;
+
+            if ((ret = av_hwframe_transfer_data(o2, oFrame2, 0)) < 0) {
+                return ret;
+            }
+            av_frame_free(&oFrame2);
+            oFrame2 = o2;
         }
     }
 
