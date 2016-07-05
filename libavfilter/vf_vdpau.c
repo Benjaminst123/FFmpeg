@@ -1292,17 +1292,18 @@ static int filter_frame_vdpau(AVFilterLink *inlink, AVFrame *frame, AVFrame *ove
 
     if (outlink->format != AV_PIX_FMT_VDPAU_OUTPUTSURFACE) {
         //download frame
-        AVFrame* o1 = av_frame_alloc();
-        if (o1 == NULL) {
+        AVFrame* tmp = ff_get_video_buffer(outlink, outlink->w, outlink->h);
+        av_frame_copy_props(tmp, oFrame);
+        if (tmp == NULL) {
             return AVERROR(ENOMEM);
         }
-        o1->format = outlink->format;
+        tmp->format = outlink->format;
 
-        if ((ret = av_hwframe_transfer_data(o1, oFrame, 0)) < 0) {
+        if ((ret = av_hwframe_transfer_data(tmp, oFrame, 0)) < 0) {
             return ret;
         }
         av_frame_free(&oFrame);
-        oFrame = o1;
+        oFrame = tmp;
 
     }
 
@@ -1336,17 +1337,18 @@ static int filter_frame_vdpau(AVFilterLink *inlink, AVFrame *frame, AVFrame *ove
 
         if (outlink->format != AV_PIX_FMT_VDPAU_OUTPUTSURFACE) {
             //download frame
-            AVFrame* o2 = av_frame_alloc();
-            if (o2 == NULL) {
+            AVFrame* tmp = av_frame_alloc();
+            if (tmp == NULL) {
                 return AVERROR(ENOMEM);
             }
-            o2->format = outlink->format;
+            av_frame_copy_props(tmp, oFrame2);
+            tmp->format = outlink->format;
 
-            if ((ret = av_hwframe_transfer_data(o2, oFrame2, 0)) < 0) {
+            if ((ret = av_hwframe_transfer_data(tmp, oFrame2, 0)) < 0) {
                 return ret;
             }
             av_frame_free(&oFrame2);
-            oFrame2 = o2;
+            oFrame2 = tmp;
         }
     }
 
