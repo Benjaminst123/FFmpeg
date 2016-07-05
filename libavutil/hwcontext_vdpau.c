@@ -36,6 +36,13 @@ typedef struct VDPAUDeviceContext {
     VdpVideoSurfacePutBitsYCbCr                     *put_data;
     VdpVideoSurfaceCreate                           *surf_create;
     VdpVideoSurfaceDestroy                          *surf_destroy;
+    VdpOutputSurfaceCreate                          *outputsurf_create;
+    VdpOutputSurfaceDestroy                         *outputsurf_destroy;
+    VdpOutputSurfacePutBitsNative                   *outputsurf_put;
+    VdpOutputSurfaceGetBitsNative                   *outputsurf_get;
+
+    enum AVPixelFormat *output_pix_fmts;
+    int output_nb_pix_fmts;
 
     enum AVPixelFormat *pix_fmts[3];
     int              nb_pix_fmts[3];
@@ -44,8 +51,17 @@ typedef struct VDPAUDeviceContext {
 typedef struct VDPAUFramesContext {
     VdpVideoSurfaceGetBitsYCbCr *get_data;
     VdpVideoSurfacePutBitsYCbCr *put_data;
+
+    VdpOutputSurfacePutBitsNative *outputsurf_put;
+    VdpOutputSurfaceGetBitsNative *outputsurf_get;
+
+    VdpRGBAFormat output_format;
+
     VdpChromaType chroma_type;
     int chroma_idx;
+
+    enum AVPixelFormat *output_pix_fmts;
+    int output_nb_pix_fmts;
 
     const enum AVPixelFormat *pix_fmts;
     int                       nb_pix_fmts;
@@ -149,6 +165,11 @@ do {                                                                            
     GET_CALLBACK(VDP_FUNC_ID_VIDEO_SURFACE_PUT_BITS_Y_CB_CR, put_data);
     GET_CALLBACK(VDP_FUNC_ID_VIDEO_SURFACE_CREATE,           surf_create);
     GET_CALLBACK(VDP_FUNC_ID_VIDEO_SURFACE_DESTROY,          surf_destroy);
+    GET_CALLBACK(VDP_FUNC_ID_OUTPUT_SURFACE_CREATE,          outputsurf_create);
+    GET_CALLBACK(VDP_FUNC_ID_OUTPUT_SURFACE_DESTROY,         outputsurf_destroy);
+    GET_CALLBACK(VDP_FUNC_ID_OUTPUT_SURFACE_GET_BITS_NATIVE, outputsurf_get);
+    GET_CALLBACK(VDP_FUNC_ID_OUTPUT_SURFACE_PUT_BITS_NATIVE, outputsurf_put);
+
 
     ret = vdpau_init_pixmfts(ctx);
     if (ret < 0) {
@@ -172,9 +193,16 @@ static void vdpau_buffer_free(void *opaque, uint8_t *data)
 {
     AVHWFramesContext          *ctx = opaque;
     VDPAUDeviceContext *device_priv = ctx->device_ctx->internal->priv;
-    VdpVideoSurface            surf = (VdpVideoSurface)(uintptr_t)data;
 
-    device_priv->surf_destroy(surf);
+    if (ctx->format == AV_PIX_FMT_VDPAU) {
+        VdpVideoSurface            surf = (VdpVideoSurface)(uintptr_t)data;
+        device_priv->surf_destroy(surf);
+    } else if (ctx->format == AV_PIX_FMT_VDPAU_OUTPUTSURFACE) {
+        VdpOutputSurface surf = (VdpOutputSurface)(uintptr_t)data;
+        device_priv->outputsurf_destroy(surf);
+    } else {
+        assert(0 && "Invalid Format!");
+    }
 }
 
 static AVBufferRef *vdpau_pool_alloc(void *opaque, int size)
@@ -185,25 +213,72 @@ static AVBufferRef *vdpau_pool_alloc(void *opaque, int size)
     VDPAUDeviceContext    *device_priv = ctx->device_ctx->internal->priv;
 
     AVBufferRef *ret;
-    VdpVideoSurface surf;
     VdpStatus err;
 
-    err = device_priv->surf_create(device_hwctx->device, priv->chroma_type,
-                                   ctx->width, ctx->height, &surf);
-    if (err != VDP_STATUS_OK) {
-        av_log(ctx, AV_LOG_ERROR, "Error allocating a VDPAU video surface\n");
-        return NULL;
-    }
+    if (ctx->format == AV_PIX_FMT_VDPAU) {
+        VdpVideoSurface surf;
+        err = device_priv->surf_create(device_hwctx->device, priv->chroma_type,
+                                       ctx->width, ctx->height, &surf);
+        if (err != VDP_STATUS_OK) {
+            av_log(ctx, AV_LOG_ERROR, "Error allocating a VDPAU video surface\n");
+            return NULL;
+        }
 
-    ret = av_buffer_create((uint8_t*)(uintptr_t)surf, sizeof(surf),
-                           vdpau_buffer_free, ctx, AV_BUFFER_FLAG_READONLY);
-    if (!ret) {
-        device_priv->surf_destroy(surf);
-        return NULL;
+        ret = av_buffer_create((uint8_t*)(uintptr_t)surf, sizeof(surf),
+                               vdpau_buffer_free, ctx, AV_BUFFER_FLAG_READONLY);
+        if (!ret) {
+            device_priv->surf_destroy(surf);
+            return NULL;
+        }
+    } else if (ctx->format == AV_PIX_FMT_VDPAU_OUTPUTSURFACE) {
+        VdpOutputSurface surf;
+        err = device_priv->outputsurf_create(device_hwctx->device, priv->output_format, ctx->width, ctx->height, &surf);
+
+        if (err != VDP_STATUS_OK) {
+            av_log(ctx, AV_LOG_ERROR, "Error allocating a VDPAU output surface\n");
+            return NULL;
+        }
+
+        ret = av_buffer_create((uint8_t*)(uintptr_t)surf, sizeof(surf),
+                               vdpau_buffer_free, ctx, AV_BUFFER_FLAG_READONLY);
+        if (!ret) {
+            device_priv->surf_destroy(surf);
+            return NULL;
+        }
+    } else {
+        assert(0 && "Invalid format!");
     }
 
     return ret;
 }
+
+//static AVBufferRef *vdpau_outputsurf_pool_alloc(void *opaque, int size)
+//{
+//    AVHWFramesContext             *ctx = opaque;
+//    VDPAUFramesContext           *priv = ctx->internal->priv;
+//    AVVDPAUDeviceContext *device_hwctx = ctx->device_ctx->hwctx;
+//    VDPAUDeviceContext    *device_priv = ctx->device_ctx->internal->priv;
+//
+//    AVBufferRef *ret;
+//    VdpOutputSurface surf;
+//    VdpStatus err;
+//
+//    err = device_priv->outputsurf_create(device_hwctx->device, priv->output_format, ctx->width, ctx->height, &surf);
+//
+//    if (err != VDP_STATUS_OK) {
+//        av_log(ctx, AV_LOG_ERROR, "Error allocating a VDPAU output surface\n");
+//        return NULL;
+//    }
+//
+//    ret = av_buffer_create((uint8_t*)(uintptr_t)surf, sizeof(surf),
+//                           vdpau_buffer_free, ctx, AV_BUFFER_FLAG_READONLY);
+//    if (!ret) {
+//        device_priv->surf_destroy(surf);
+//        return NULL;
+//    }
+//
+//    return ret;
+//}
 
 static int vdpau_frames_init(AVHWFramesContext *ctx)
 {
@@ -212,38 +287,60 @@ static int vdpau_frames_init(AVHWFramesContext *ctx)
 
     int i;
 
-    switch (ctx->sw_format) {
-    case AV_PIX_FMT_YUV420P: priv->chroma_type = VDP_CHROMA_TYPE_420; break;
-    case AV_PIX_FMT_YUV422P: priv->chroma_type = VDP_CHROMA_TYPE_422; break;
-    case AV_PIX_FMT_YUV444P: priv->chroma_type = VDP_CHROMA_TYPE_444; break;
-    default:
-        av_log(ctx, AV_LOG_ERROR, "Unsupported data layout: %s\n",
-               av_get_pix_fmt_name(ctx->sw_format));
-        return AVERROR(ENOSYS);
-    }
-
-    for (i = 0; i < FF_ARRAY_ELEMS(vdpau_pix_fmts); i++) {
-        if (vdpau_pix_fmts[i].chroma_type == priv->chroma_type) {
-            priv->chroma_idx  = i;
-            priv->pix_fmts    = device_priv->pix_fmts[i];
-            priv->nb_pix_fmts = device_priv->nb_pix_fmts[i];
-            break;
+    if (ctx->format == AV_PIX_FMT_VDPAU) {
+        switch (ctx->sw_format) {
+        case AV_PIX_FMT_YUV420P: priv->chroma_type = VDP_CHROMA_TYPE_420; break;
+        case AV_PIX_FMT_YUV422P: priv->chroma_type = VDP_CHROMA_TYPE_422; break;
+        case AV_PIX_FMT_YUV444P: priv->chroma_type = VDP_CHROMA_TYPE_444; break;
+        default:
+            av_log(ctx, AV_LOG_ERROR, "Unsupported data layout: %s\n",
+                   av_get_pix_fmt_name(ctx->sw_format));
+            return AVERROR(ENOSYS);
         }
-    }
-    if (!priv->pix_fmts) {
-        av_log(ctx, AV_LOG_ERROR, "Unsupported chroma type: %d\n", priv->chroma_type);
-        return AVERROR(ENOSYS);
-    }
 
-    if (!ctx->pool) {
-        ctx->internal->pool_internal = av_buffer_pool_init2(sizeof(VdpVideoSurface), ctx,
-                                                            vdpau_pool_alloc, NULL);
-        if (!ctx->internal->pool_internal)
-            return AVERROR(ENOMEM);
-    }
+        for (i = 0; i < FF_ARRAY_ELEMS(vdpau_pix_fmts); i++) {
+            if (vdpau_pix_fmts[i].chroma_type == priv->chroma_type) {
+                priv->chroma_idx  = i;
+                priv->pix_fmts    = device_priv->pix_fmts[i];
+                priv->nb_pix_fmts = device_priv->nb_pix_fmts[i];
+                break;
+            }
+        }
+        if (!priv->pix_fmts) {
+            av_log(ctx, AV_LOG_ERROR, "Unsupported chroma type: %d\n", priv->chroma_type);
+            return AVERROR(ENOSYS);
+        }
 
-    priv->get_data = device_priv->get_data;
-    priv->put_data = device_priv->put_data;
+        if (!ctx->pool) {
+            ctx->internal->pool_internal = av_buffer_pool_init2(sizeof(VdpVideoSurface), ctx,
+                                                                vdpau_pool_alloc, NULL);
+            if (!ctx->internal->pool_internal)
+                return AVERROR(ENOMEM);
+        }
+
+        priv->get_data = device_priv->get_data;
+        priv->put_data = device_priv->put_data;
+    } else if (ctx->format == AV_PIX_FMT_VDPAU_OUTPUTSURFACE) {
+        if (ctx->sw_format != AV_PIX_FMT_BGRA) {
+            av_log(ctx, AV_LOG_ERROR, "Unsupported pix fmt: %s\n",
+                   av_get_pix_fmt_name(ctx->sw_format));
+            return AVERROR(ENOSYS);
+        }
+
+        priv->output_format = VDP_RGBA_FORMAT_B8G8R8A8;
+
+        if (!ctx->pool) {
+            ctx->internal->pool_internal = av_buffer_pool_init2(sizeof(VdpOutputSurface), ctx,
+                                                                vdpau_pool_alloc, NULL);
+            if (!ctx->internal->pool_internal)
+                return AVERROR(ENOMEM);
+        }
+
+        priv->outputsurf_get = device_priv->outputsurf_get;
+        priv->outputsurf_put = device_priv->outputsurf_put;
+    } else {
+        assert(0 && "Invalid format!");
+    }
 
     return 0;
 }
@@ -255,7 +352,7 @@ static int vdpau_get_buffer(AVHWFramesContext *ctx, AVFrame *frame)
         return AVERROR(ENOMEM);
 
     frame->data[3] = frame->buf[0]->data;
-    frame->format  = AV_PIX_FMT_VDPAU;
+    frame->format  = ctx->format;
     frame->width   = ctx->width;
     frame->height  = ctx->height;
 
@@ -270,17 +367,28 @@ static int vdpau_transfer_get_formats(AVHWFramesContext *ctx,
 
     enum AVPixelFormat *fmts;
 
-    if (priv->nb_pix_fmts == 1) {
-        av_log(ctx, AV_LOG_ERROR,
-               "No target formats are supported for this chroma type\n");
-        return AVERROR(ENOSYS);
+    if (ctx->format == AV_PIX_FMT_VDPAU) {
+
+        if (priv->nb_pix_fmts == 1) {
+            av_log(ctx, AV_LOG_ERROR,
+                   "No target formats are supported for this chroma type\n");
+            return AVERROR(ENOSYS);
+        }
+
+        fmts = av_malloc_array(priv->nb_pix_fmts, sizeof(*fmts));
+        if (!fmts)
+            return AVERROR(ENOMEM);
+
+        memcpy(fmts, priv->pix_fmts, sizeof(*fmts) * (priv->nb_pix_fmts));
+    } else if (ctx->format = AV_PIX_FMT_VDPAU_OUTPUTSURFACE) {
+        fmts = av_malloc_array(1, sizeof(*fmts));
+        if (!fmts)
+            return AVERROR(ENOMEM);
+        fmts[0] = AV_PIX_FMT_BGRA;
+    } else {
+        assert(0 && "Invalid format!");
     }
 
-    fmts = av_malloc_array(priv->nb_pix_fmts, sizeof(*fmts));
-    if (!fmts)
-        return AVERROR(ENOMEM);
-
-    memcpy(fmts, priv->pix_fmts, sizeof(*fmts) * (priv->nb_pix_fmts));
     *formats = fmts;
 
     return 0;
@@ -290,13 +398,10 @@ static int vdpau_transfer_data_from(AVHWFramesContext *ctx, AVFrame *dst,
                                     const AVFrame *src)
 {
     VDPAUFramesContext *priv = ctx->internal->priv;
-    VdpVideoSurface     surf = (VdpVideoSurface)(uintptr_t)src->data[3];
 
     void *data[3];
-    uint32_t linesize[3];
+    uint32_t linesize[3] = {0};
 
-    const VDPAUPixFmtMap *map;
-    VdpYCbCrFormat vdpau_format;
     VdpStatus err;
     int i;
 
@@ -311,27 +416,50 @@ static int vdpau_transfer_data_from(AVHWFramesContext *ctx, AVFrame *dst,
         linesize[i] = dst->linesize[i];
     }
 
-    map = vdpau_pix_fmts[priv->chroma_idx].map;
-    for (i = 0; map[i].pix_fmt != AV_PIX_FMT_NONE; i++) {
-        if (map[i].pix_fmt == dst->format) {
-            vdpau_format = map[i].vdpau_fmt;
-            break;
+    if (ctx->format == AV_PIX_FMT_VDPAU) {
+        VdpVideoSurface     surf = (VdpVideoSurface)(uintptr_t)src->data[3];
+        const VDPAUPixFmtMap *map;
+        VdpYCbCrFormat vdpau_format;
+
+        map = vdpau_pix_fmts[priv->chroma_idx].map;
+        for (i = 0; map[i].pix_fmt != AV_PIX_FMT_NONE; i++) {
+            if (map[i].pix_fmt == dst->format) {
+                vdpau_format = map[i].vdpau_fmt;
+                break;
+            }
         }
-    }
-    if (map[i].pix_fmt == AV_PIX_FMT_NONE) {
-        av_log(ctx, AV_LOG_ERROR,
-               "Unsupported target pixel format: %s\n",
-               av_get_pix_fmt_name(dst->format));
-        return AVERROR(EINVAL);
-    }
+        if (map[i].pix_fmt == AV_PIX_FMT_NONE) {
+            av_log(ctx, AV_LOG_ERROR,
+                   "Unsupported target pixel format: %s\n",
+                   av_get_pix_fmt_name(dst->format));
+            return AVERROR(EINVAL);
+        }
 
-    if (vdpau_format == VDP_YCBCR_FORMAT_YV12)
-        FFSWAP(void*, data[1], data[2]);
+        if (vdpau_format == VDP_YCBCR_FORMAT_YV12)
+            FFSWAP(void*, data[1], data[2]);
 
-    err = priv->get_data(surf, vdpau_format, data, linesize);
-    if (err != VDP_STATUS_OK) {
-        av_log(ctx, AV_LOG_ERROR, "Error retrieving the data from a VDPAU surface\n");
-        return AVERROR_UNKNOWN;
+        err = priv->get_data(surf, vdpau_format, data, linesize);
+        if (err != VDP_STATUS_OK) {
+            av_log(ctx, AV_LOG_ERROR, "Error retrieving the data from a VDPAU surface\n");
+            return AVERROR_UNKNOWN;
+        }
+    } else if (ctx->format = AV_PIX_FMT_VDPAU_OUTPUTSURFACE) {
+        VdpOutputSurface     surf = (VdpOutputSurface)(uintptr_t)src->data[3];
+
+        if (dst->format != AV_PIX_FMT_BGRA) {
+            av_log(ctx, AV_LOG_ERROR,
+                   "Unsupported target pixel format: %s\n",
+                   av_get_pix_fmt_name(dst->format));
+            return AVERROR(EINVAL);
+        }
+
+        err = priv->outputsurf_get(surf, NULL, data, linesize);
+        if (err != VDP_STATUS_OK) {
+            av_log(ctx, AV_LOG_ERROR, "Error retrieving the data from a VDPAU outputsurface\n");
+            return AVERROR_UNKNOWN;
+        }
+    } else {
+        assert(0 && "Invalid format");
     }
 
     return 0;
@@ -341,13 +469,10 @@ static int vdpau_transfer_data_to(AVHWFramesContext *ctx, AVFrame *dst,
                                   const AVFrame *src)
 {
     VDPAUFramesContext *priv = ctx->internal->priv;
-    VdpVideoSurface     surf = (VdpVideoSurface)(uintptr_t)dst->data[3];
 
     const void *data[3];
     uint32_t linesize[3];
 
-    const VDPAUPixFmtMap *map;
-    VdpYCbCrFormat vdpau_format;
     VdpStatus err;
     int i;
 
@@ -362,27 +487,48 @@ static int vdpau_transfer_data_to(AVHWFramesContext *ctx, AVFrame *dst,
         linesize[i] = src->linesize[i];
     }
 
-    map = vdpau_pix_fmts[priv->chroma_idx].map;
-    for (i = 0; map[i].pix_fmt != AV_PIX_FMT_NONE; i++) {
-        if (map[i].pix_fmt == src->format) {
-            vdpau_format = map[i].vdpau_fmt;
-            break;
+    if (ctx->format == AV_PIX_FMT_VDPAU) {
+        VdpVideoSurface     surf = (VdpVideoSurface)(uintptr_t)dst->data[3];
+        const VDPAUPixFmtMap *map;
+        VdpYCbCrFormat vdpau_format;
+
+        map = vdpau_pix_fmts[priv->chroma_idx].map;
+        for (i = 0; map[i].pix_fmt != AV_PIX_FMT_NONE; i++) {
+            if (map[i].pix_fmt == src->format) {
+                vdpau_format = map[i].vdpau_fmt;
+                break;
+            }
         }
-    }
-    if (map[i].pix_fmt == AV_PIX_FMT_NONE) {
-        av_log(ctx, AV_LOG_ERROR,
-               "Unsupported source pixel format: %s\n",
-               av_get_pix_fmt_name(src->format));
-        return AVERROR(EINVAL);
-    }
+        if (map[i].pix_fmt == AV_PIX_FMT_NONE) {
+            av_log(ctx, AV_LOG_ERROR,
+                   "Unsupported source pixel format: %s\n",
+                   av_get_pix_fmt_name(src->format));
+            return AVERROR(EINVAL);
+        }
 
-    if (vdpau_format == VDP_YCBCR_FORMAT_YV12)
-        FFSWAP(const void*, data[1], data[2]);
+        if (vdpau_format == VDP_YCBCR_FORMAT_YV12)
+            FFSWAP(const void*, data[1], data[2]);
 
-    err = priv->put_data(surf, vdpau_format, data, linesize);
-    if (err != VDP_STATUS_OK) {
-        av_log(ctx, AV_LOG_ERROR, "Error uploading the data to a VDPAU surface\n");
-        return AVERROR_UNKNOWN;
+        err = priv->put_data(surf, vdpau_format, data, linesize);
+        if (err != VDP_STATUS_OK) {
+            av_log(ctx, AV_LOG_ERROR, "Error uploading the data to a VDPAU surface\n");
+            return AVERROR_UNKNOWN;
+        }
+    } else if (ctx->format = AV_PIX_FMT_VDPAU_OUTPUTSURFACE) {
+        VdpOutputSurface     surf = (VdpOutputSurface)(uintptr_t)dst->data[3];
+
+        if (dst->format != priv->output_format) {
+            av_log(ctx, AV_LOG_ERROR,
+                   "Unsupported source pixel format: %s\n",
+                   av_get_pix_fmt_name(src->format));
+            return AVERROR(EINVAL);
+        }
+
+        err = priv->outputsurf_put(surf, data, linesize, NULL);
+        if (err != VDP_STATUS_OK) {
+            av_log(ctx, AV_LOG_ERROR, "Error uploading the data to a VDPAU output surface\n");
+            return AVERROR_UNKNOWN;
+        }
     }
 
     return 0;
@@ -404,5 +550,5 @@ const HWContextType ff_hwcontext_type_vdpau = {
     .transfer_data_to     = vdpau_transfer_data_to,
     .transfer_data_from   = vdpau_transfer_data_from,
 
-    .pix_fmts = (const enum AVPixelFormat[]){ AV_PIX_FMT_VDPAU, AV_PIX_FMT_NONE },
+    .pix_fmts = (const enum AVPixelFormat[]){ AV_PIX_FMT_VDPAU, AV_PIX_FMT_VDPAU_OUTPUTSURFACE, AV_PIX_FMT_NONE },
 };
