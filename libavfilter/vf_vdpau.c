@@ -45,8 +45,8 @@
 #define MAX_FUTURE_FRAMES 5
 #define MAX_PAST_FRAMES 5
 
-#define MAX_SUPPORTED_FEATURES 4
-#define MAX_SUPPORTED_ATTRIBUTES 4
+#define MAX_SUPPORTED_FEATURES 6
+#define MAX_SUPPORTED_ATTRIBUTES 6
 
 enum var_name {
     VAR_IN_W,   VAR_IW,
@@ -741,14 +741,17 @@ static int config_input(AVFilterLink *inlink)
     VdpVideoMixerParameter parameters[] = {
         VDP_VIDEO_MIXER_PARAMETER_VIDEO_SURFACE_WIDTH,
         VDP_VIDEO_MIXER_PARAMETER_VIDEO_SURFACE_HEIGHT,
-        VDP_VIDEO_MIXER_PARAMETER_LAYERS,
+        VDP_VIDEO_MIXER_PARAMETER_LAYERS
     };
     int layers = (s->use_overlay) ? 1 : 0;
+    VdpColor background_color = {0, 0, 0, 1.0};
     const void *parameter_values[] = {
         &inlink->w,
         &inlink->h,
         &layers
     };
+    s->attributes[s->attribute_cnt] = VDP_VIDEO_MIXER_ATTRIBUTE_BACKGROUND_COLOR;
+    s->attribute_values[s->attribute_cnt++] = &background_color;
 
     if (ctx->hw_device_ctx == 0) {
         av_log(ctx, AV_LOG_ERROR, "No vdpau device given\n");
