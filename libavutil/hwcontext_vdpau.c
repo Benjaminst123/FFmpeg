@@ -380,7 +380,7 @@ static int vdpau_transfer_get_formats(AVHWFramesContext *ctx,
             return AVERROR(ENOMEM);
 
         memcpy(fmts, priv->pix_fmts, sizeof(*fmts) * (priv->nb_pix_fmts));
-    } else if (ctx->format = AV_PIX_FMT_VDPAU_OUTPUTSURFACE) {
+    } else if (ctx->format == AV_PIX_FMT_VDPAU_OUTPUTSURFACE) {
         fmts = av_malloc_array(1, sizeof(*fmts));
         if (!fmts)
             return AVERROR(ENOMEM);
@@ -443,7 +443,7 @@ static int vdpau_transfer_data_from(AVHWFramesContext *ctx, AVFrame *dst,
             av_log(ctx, AV_LOG_ERROR, "Error retrieving the data from a VDPAU surface\n");
             return AVERROR_UNKNOWN;
         }
-    } else if (ctx->format = AV_PIX_FMT_VDPAU_OUTPUTSURFACE) {
+    } else if (ctx->format == AV_PIX_FMT_VDPAU_OUTPUTSURFACE) {
         VdpOutputSurface     surf = (VdpOutputSurface)(uintptr_t)src->data[3];
 
         if (dst->format != AV_PIX_FMT_BGRA) {
@@ -471,7 +471,7 @@ static int vdpau_transfer_data_to(AVHWFramesContext *ctx, AVFrame *dst,
     VDPAUFramesContext *priv = ctx->internal->priv;
 
     const void *data[3];
-    uint32_t linesize[3];
+    uint32_t linesize[3] = {0};
 
     VdpStatus err;
     int i;
@@ -514,10 +514,10 @@ static int vdpau_transfer_data_to(AVHWFramesContext *ctx, AVFrame *dst,
             av_log(ctx, AV_LOG_ERROR, "Error uploading the data to a VDPAU surface\n");
             return AVERROR_UNKNOWN;
         }
-    } else if (ctx->format = AV_PIX_FMT_VDPAU_OUTPUTSURFACE) {
+    } else if (ctx->format == AV_PIX_FMT_VDPAU_OUTPUTSURFACE) {
         VdpOutputSurface     surf = (VdpOutputSurface)(uintptr_t)dst->data[3];
 
-        if (dst->format != priv->output_format) {
+        if (src->format != AV_PIX_FMT_BGRA) {
             av_log(ctx, AV_LOG_ERROR,
                    "Unsupported source pixel format: %s\n",
                    av_get_pix_fmt_name(src->format));
