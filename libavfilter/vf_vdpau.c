@@ -179,6 +179,7 @@ typedef struct {
     AVBufferRef *hwdevice;
     AVBufferRef *hwframe;
     AVBufferRef *output_hwframe;
+    AVBufferRef *overlay_hwframe;
 
     VdpVideoMixer mixer;
     VdpVideoSurface   videosSurface;
@@ -691,11 +692,12 @@ static int query_formats(AVFilterContext *ctx)
         AV_PIX_FMT_NONE
     };
     static const enum AVPixelFormat pix_fmt_overlay_in[] = {
+        //AV_PIX_FMT_VDPAU_OUTPUTSURFACE,
         AV_PIX_FMT_BGRA,
-        AV_PIX_FMT_VDPAU_OUTPUTSURFACE,
         AV_PIX_FMT_NONE
     };
     static const enum AVPixelFormat pix_fmts_out[] = {
+        AV_PIX_FMT_VDPAU_OUTPUTSURFACE,
         AV_PIX_FMT_BGRA,
         AV_PIX_FMT_NONE
     };
@@ -1038,15 +1040,25 @@ static int config_output(AVFilterLink *outlink)
     }
 
     if (s->use_overlay) {
-        VdpStatus status;
-        if ((surface_format = get_vdpau_rgb_format(ctx->inputs[1]->format) == VDP_INVALID_HANDLE)) {
-            return AVERROR_INVALIDDATA;
-        }
-        status = vdpauFuncs->vdpOutputSurfaceCreate(s->device, surface_format, inlink->w, inlink->h, &s->overlaySurface);
-        if (status != VDP_STATUS_OK) {
-            av_log(ctx, AV_LOG_ERROR, "VDPAU overlay surface create on X11 display failed: %s\n",
-                   vdpauFuncs->vdpGetErrorString(status));
-            return -1;
+        if (ctx->inputs[1]->format != AV_PIX_FMT_VDPAU_OUTPUTSURFACE) {
+            AVHWFramesContext *overlay_hwframe_ctx;
+            s->overlay_hwframe = av_hwframe_ctx_alloc(s->hwdevice);
+            if (s->overlay_hwframe == NULL) {
+                return AVERROR(ENOMEM);
+            }
+
+            overlay_hwframe_ctx             = (AVHWFramesContext*)s->overlay_hwframe->data;
+            overlay_hwframe_ctx->format     = AV_PIX_FMT_VDPAU_OUTPUTSURFACE;
+            overlay_hwframe_ctx->sw_format  = AV_PIX_FMT_BGRA;
+            overlay_hwframe_ctx->width      = ctx->inputs[1]->w;
+            overlay_hwframe_ctx->height     = ctx->inputs[1]->h;
+            ret = av_hwframe_ctx_init(s->overlay_hwframe);
+            if (ret < 0)
+                return ret;
+        } else {
+            if ((s->overlay_hwframe = av_buffer_ref(ctx->inputs[1]->hw_frames_ctx)) == 0) {
+                return AVERROR(ENOMEM);
+            }
         }
     }
 
@@ -1068,19 +1080,44 @@ static int upload_frame_outputsurface(VdpauContext *s, AVFrame *frame, VdpOutput
     return 0;
 }
 
-static int upload_frame(AVBufferRef *hwframe, AVFrame *frame, AVFrame* src)
+static int upload_frame(AVBufferRef *hwframe, AVFrame *frame)
 {
     int ret;
-    ret = av_hwframe_get_buffer(hwframe, frame, 0);
-    if (ret < 0) {
+    AVFrame *tmp = av_frame_alloc();
+    if (tmp == NULL) {
+        return AVERROR(ENOMEM);
+    }
+
+    if ((ret = av_hwframe_get_buffer(hwframe, tmp, 0)) < 0) {
         return ret;
     }
 
-    ret = av_hwframe_transfer_data(frame, src, 0);
-    if (ret < 0) {
+    if ((ret = av_hwframe_transfer_data(tmp, frame, 0)) < 0) {
         return ret;
     }
-    av_frame_copy_props(frame, src);
+
+    if ((ret = av_frame_copy_props(tmp, frame)) < 0) {
+        return ret;
+    }
+
+    av_frame_unref(frame);
+    av_frame_move_ref(frame, tmp);
+
+    return 0;
+}
+
+static int download_frame(AVFilterLink *link, AVFrame *frame)
+{
+    int ret;
+    AVFrame* tmp = ff_get_video_buffer(link, link->w, link->h);
+    av_frame_copy_props(tmp, frame);
+
+    if ((ret = av_hwframe_transfer_data(tmp, frame, 0)) < 0) {
+        return ret;
+    }
+
+    av_frame_unref(frame);
+    av_frame_move_ref(frame, tmp);
 
     return 0;
 }
@@ -1205,16 +1242,13 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame) {
     }
 }
 
-
 static int filter_frame_vdpau(AVFilterLink *inlink, AVFrame *frame, AVFrame *overlay)
 {
     AVFilterContext *ctx = inlink->dst;
     AVFilterLink *outlink = ctx->outputs[0];
     VdpauContext *s = ctx->priv;
-    VdpauFunctions *vdpauFuncs = &s->vdpaufuncs;
     int ret;
-    AVFrame *oFrame, *oFrame2;
-    AVFrame *iFrame;
+    AVFrame *oFrame1, *oFrame2;
     VdpVideoSurface past_surfaces[MAX_PAST_FRAMES];
     VdpVideoSurface future_surfaces[MAX_FUTURE_FRAMES];
     VdpVideoMixerPictureStructure picture_structure;
@@ -1223,26 +1257,23 @@ static int filter_frame_vdpau(AVFilterLink *inlink, AVFrame *frame, AVFrame *ove
     VdpLayer *layers = NULL;
     int layer_count = 0;
 
-    if (frame != NULL && s->in_format != AV_PIX_FMT_VDPAU) {
-        iFrame = av_frame_alloc();
-        ret = upload_frame(s->hwframe, iFrame, frame);
-        av_frame_free(&frame);
-        if (ret < 0) {
-            av_frame_free(&overlay);
-            av_frame_free(&iFrame);
+    if (frame != NULL && frame->format != AV_PIX_FMT_VDPAU) {
+        if ((ret = upload_frame(s->hwframe, frame)) < 0) {
             return ret;
         }
-    } else if (frame != NULL) {
-        iFrame = frame;
-    } else {
-        iFrame = NULL;
+    }
+
+    if (s->use_overlay && overlay != NULL && overlay->format != AV_PIX_FMT_VDPAU_OUTPUTSURFACE) {
+        if ((ret = upload_frame(s->overlay_hwframe, overlay)) < 0) {
+            return ret;
+        }
     }
 
     if (s->future_frames[0] == NULL && s->cur_frame != 0) {
         s->eof = 1;
     }
 
-    update_frames(s, iFrame);
+    update_frames(s, frame);
     if (s->use_overlay) {
         update_overlay_frames(s, overlay);
     }
@@ -1263,15 +1294,9 @@ static int filter_frame_vdpau(AVFilterLink *inlink, AVFrame *frame, AVFrame *ove
 
     //handle overlay
     if (s->use_overlay) {
-        ret = upload_frame_outputsurface(s, s->cur_overlay_frame, s->overlaySurface);
-        //av_frame_free(&overlay);
-        if (ret < 0) {
-            return ret;
-        }
-
         overlay_rect = (VdpRect){ s->x1, s->y1, s->x2, s->y2};
         overlay_layer.struct_version = VDP_LAYER_VERSION;
-        overlay_layer.source_surface = s->overlaySurface;
+        overlay_layer.source_surface = (VdpOutputSurface)s->cur_overlay_frame->data[3];
         overlay_layer.source_rect    = NULL;
         overlay_layer.destination_rect = &overlay_rect;
 
@@ -1280,38 +1305,28 @@ static int filter_frame_vdpau(AVFilterLink *inlink, AVFrame *frame, AVFrame *ove
     }
 
     //get output surface frame
-    oFrame = av_frame_alloc();
-    ret =  av_hwframe_get_buffer(s->output_hwframe, oFrame, 0);
-    if (ret < 0) {
+    oFrame1 = av_frame_alloc();
+    if ((ret = av_hwframe_get_buffer(s->output_hwframe, oFrame1, 0)) < 0) {
         return ret;
     }
-    av_frame_copy_props(oFrame, s->cur_frame);
+    if ((ret = av_frame_copy_props(oFrame1, s->cur_frame)) < 0) {
+        return ret;
+    }
 
     ret = render_frame(ctx, s->mixer, picture_structure, past_surfaces,
-            (VdpVideoSurface)s->cur_frame->data[3], future_surfaces, (VdpOutputSurface)oFrame->data[3], layer_count, layers);
+            (VdpVideoSurface)s->cur_frame->data[3], future_surfaces, (VdpOutputSurface)oFrame1->data[3], layer_count, layers);
     if (ret < 0) {
         return ret;
     }
 
     if (outlink->format != AV_PIX_FMT_VDPAU_OUTPUTSURFACE) {
-        //download frame
-        AVFrame* tmp = ff_get_video_buffer(outlink, outlink->w, outlink->h);
-        av_frame_copy_props(tmp, oFrame);
-        if (tmp == NULL) {
-            return AVERROR(ENOMEM);
-        }
-        tmp->format = outlink->format;
-
-        if ((ret = av_hwframe_transfer_data(tmp, oFrame, 0)) < 0) {
+        if ((ret = download_frame(outlink, oFrame1)) < 0) {
             return ret;
         }
-        av_frame_free(&oFrame);
-        oFrame = tmp;
-
     }
 
     if (s->double_framerate) {
-        oFrame->pts = ((s->start_time == AV_NOPTS_VALUE) ? 0 : s->start_time) +
+        oFrame1->pts = ((s->start_time == AV_NOPTS_VALUE) ? 0 : s->start_time) +
                       av_rescale(outlink->frame_count, s->ts_unit.num, s->ts_unit.den);
 
         if (picture_structure == VDP_VIDEO_MIXER_PICTURE_STRUCTURE_TOP_FIELD) {
@@ -1322,44 +1337,34 @@ static int filter_frame_vdpau(AVFilterLink *inlink, AVFrame *frame, AVFrame *ove
 
         //get output surface frame
         oFrame2 = av_frame_alloc();
-        ret =  av_hwframe_get_buffer(s->output_hwframe, oFrame2, 0);
-        if (ret < 0) {
+        if ((ret = av_hwframe_get_buffer(s->output_hwframe, oFrame2, 0)) < 0) {
             return ret;
         }
-        av_frame_copy_props(oFrame2, s->cur_frame);
+        if ((ret = av_frame_copy_props(oFrame2, s->cur_frame)) < 0) {
+            return ret;
+        }
 
         ret = render_frame(ctx, s->mixer, picture_structure, past_surfaces,
                 (VdpVideoSurface)s->cur_frame->data[3], future_surfaces, (VdpOutputSurface)oFrame2->data[3], layer_count, layers);
         if (ret < 0) {
             return ret;
         }
-        oFrame2 = ff_get_video_buffer(outlink, outlink->w, outlink->h);
+
         oFrame2->pts = ((s->start_time == AV_NOPTS_VALUE) ? 0 : s->start_time) +
                        av_rescale(outlink->frame_count + 1, s->ts_unit.num, s->ts_unit.den);
 
-
         if (outlink->format != AV_PIX_FMT_VDPAU_OUTPUTSURFACE) {
             //download frame
-            AVFrame* tmp = av_frame_alloc();
-            if (tmp == NULL) {
-                return AVERROR(ENOMEM);
-            }
-            av_frame_copy_props(tmp, oFrame2);
-            tmp->format = outlink->format;
-
-            if ((ret = av_hwframe_transfer_data(tmp, oFrame2, 0)) < 0) {
+            if ((ret = download_frame(outlink, oFrame2)) < 0) {
                 return ret;
             }
-            av_frame_free(&oFrame2);
-            oFrame2 = tmp;
         }
     }
 
-    //av_frame_free(&frame);
-    ret = ff_filter_frame(outlink, oFrame);
-    if (ret < 0) {
+    if ((ret = ff_filter_frame(outlink, oFrame1)) < 0) {
         return ret;
     }
+
     if (s->double_framerate) {
         ret = ff_filter_frame(outlink, oFrame2);
     }
