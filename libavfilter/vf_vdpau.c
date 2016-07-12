@@ -170,9 +170,6 @@ typedef struct {
 typedef struct {
     const AVClass *class;
 
-//    Display *display;
-//    char *display_name;
-
     VdpDevice device;
     VdpauFunctions vdpaufuncs;
 
@@ -541,26 +538,6 @@ static av_cold int init(AVFilterContext *ctx)
         av_opt_set(s, "h", buf, 0);
     }
 
-//    //open display
-//    s->display = XOpenDisplay(0);
-//    if (!s->display) {
-//        av_log(ctx, AV_LOG_ERROR, "Cannot open the X11 display %s.\n",
-//               XDisplayName(0));
-//        return -1;
-//    }
-//    s->display_name = XDisplayString(s->display);
-//
-//    //setup vdpau device
-//    status = vdp_device_create_x11(s->display, XDefaultScreen(s->display),
-//                                &s->device, &vdpauFuncs->get_proc_address);
-//    if (status != VDP_STATUS_OK) {
-//        av_log(ctx, AV_LOG_ERROR, "VDPAU device creation on X11 display %s failed.\n",
-//                XDisplayName(0));
-//        return AVERROR_UNKNOWN;
-//    }
-
-
-
     s->future_frames_cnt = 0;
     s->past_frames_cnt   = 0;
 
@@ -761,27 +738,16 @@ static int config_input(AVFilterLink *inlink)
     }
 
     //allocate hardware context
-    s->hwdevice = ctx->hw_device_ctx;//av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_VDPAU);
-//    if (!s->hwdevice) {
-//        return AVERROR(ENOMEM);
-//    }
+    s->hwdevice = av_buffer_ref(ctx->hw_device_ctx);
+    if (s->hwdevice == NULL) {
+        return AVERROR(ENOMEM);
+    }
 
     device_ctx       = (AVHWDeviceContext*)s->hwdevice->data;
-    //device_ctx->free = NULL;
 
     device_hwctx = device_ctx->hwctx;
-//    device_hwctx->device = s->device;
-//    device_hwctx->get_proc_address = vdpauFuncs->get_proc_address;
     vdpauFuncs->get_proc_address = device_hwctx->get_proc_address;
     s->device = device_hwctx->device;
-
-    //init hardware device
-//    ret = av_hwdevice_ctx_init(s->hwdevice);
-//    if (ret < 0)
-//        return ret;
-
-    //av_buffer_unref(&s->hwframe);
-
 
     s->in_format = inlink->format;
 
@@ -1403,8 +1369,6 @@ static av_cold void uninit(AVFilterContext *ctx)
     }
 
     if (s->mixer) vdpauFuncs->vdpVideoMixerDestroy(s->mixer);
-//    if (s->device) vdpauFuncs->vdpDeviceDestroy(s->device);
-//    if (s->display) XCloseDisplay(s->display);
 }
 
 static const AVFilterPad vdpau_inputs[] = {
