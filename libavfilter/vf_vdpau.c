@@ -982,15 +982,11 @@ static int config_output(AVFilterLink *outlink)
         }
     }
 
-    if ((surface_format = get_vdpau_rgb_format(outlink->format) == VDP_INVALID_HANDLE)) {
-        return AVERROR_INVALIDDATA;
-    }
-    ret = vdpauFuncs->vdpOutputSurfaceCreate(s->device, surface_format, outlink->w, outlink->h, &s->outputSurface);
-    if (ret != VDP_STATUS_OK) {
-        av_log(ctx, AV_LOG_ERROR, "VDPAU output surface create on X11 display failed: %s\n",
-               vdpauFuncs->vdpGetErrorString(ret));
-        vdpauFuncs->vdpVideoSurfaceDestroy(s->videosSurface);
-        return AVERROR_UNKNOWN;
+    if (outlink->format == AV_PIX_FMT_VDPAU_OUTPUTSURFACE) {
+        outlink->hw_frames_ctx = av_buffer_ref(s->output_hwframe);
+        if (outlink->hw_frames_ctx == NULL) {
+            return AVERROR(ENOMEM);
+        }
     }
 
     if (s->use_overlay) {

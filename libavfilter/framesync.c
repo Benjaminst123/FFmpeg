@@ -19,6 +19,7 @@
  */
 
 #include "libavutil/avassert.h"
+#include "libavutil/pixdesc.h"
 #include "avfilter.h"
 #include "bufferqueue.h"
 #include "framesync.h"
@@ -248,9 +249,10 @@ int ff_framesync_get_frame(FFFrameSync *fs, unsigned in, AVFrame **rframe,
                 (!fs->in[i].have_next || fs->in[i].pts_next < pts_next))
                 need_copy = 1;
         if (need_copy) {
+            const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(frame->format);
             if (!(frame = av_frame_clone(frame)))
                 return AVERROR(ENOMEM);
-            if ((ret = av_frame_make_writable(frame)) < 0) {
+            if (((desc == NULL) || !(desc->flags & AV_PIX_FMT_FLAG_HWACCEL)) && (ret = av_frame_make_writable(frame)) < 0) {
                 av_frame_free(&frame);
                 return ret;
             }
