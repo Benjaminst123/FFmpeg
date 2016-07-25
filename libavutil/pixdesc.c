@@ -1825,6 +1825,12 @@ static const AVPixFmtDescriptor av_pix_fmt_descriptors[AV_PIX_FMT_NB] = {
         .log2_chroma_h = 1,
         .flags = AV_PIX_FMT_FLAG_HWACCEL,
     },
+    [AV_PIX_FMT_VDPAU_OUTPUTSURFACE] = {
+        .name = "vdpauoutputsurface",
+        .log2_chroma_w = 0,
+        .log2_chroma_h = 0,
+        .flags = AV_PIX_FMT_FLAG_HWACCEL,
+    },
     [AV_PIX_FMT_XYZ12LE] = {
         .name = "xyz12le",
         .nb_components = 3,
