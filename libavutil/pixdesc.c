@@ -2487,6 +2487,20 @@ enum AVPixelFormat av_find_best_pix_fmt_of_2(enum AVPixelFormat dst_pix_fmt1, en
     const AVPixFmtDescriptor *desc2 = av_pix_fmt_desc_get(dst_pix_fmt2);
     int score1, score2;
 
+    if (dst_pix_fmt1 < 0) {
+        return dst_pix_fmt2;
+    }
+    if (dst_pix_fmt2 < 0) {
+        return dst_pix_fmt1;
+    }
+
+    if ((desc1->flags & AV_PIX_FMT_FLAG_HWACCEL) && !(desc2->flags & AV_PIX_FMT_FLAG_HWACCEL)) {
+        return dst_pix_fmt1;
+    }
+    if (!(desc1->flags & AV_PIX_FMT_FLAG_HWACCEL) && (desc2->flags & AV_PIX_FMT_FLAG_HWACCEL)) {
+        return dst_pix_fmt2;
+    }
+
     loss_mask= loss_ptr?~*loss_ptr:~0; /* use loss mask if provided */
     if(!has_alpha)
         loss_mask &= ~FF_LOSS_ALPHA;
