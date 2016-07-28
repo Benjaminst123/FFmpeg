@@ -205,6 +205,9 @@ typedef struct {
 
     int eof;
 
+    int hflip;
+    int vflip;
+
     float noise_reduction;
     float sharpness;
     int deinterlacer;
@@ -243,6 +246,8 @@ typedef struct {
 
 static const AVOption vdpau_options[] = {
     { "future_frame_number", "set number of future frames ", OFFSET(future_frames_cnt),   AV_OPT_TYPE_INT, {.i64 = 1}, 0, MAX_FUTURE_FRAMES, FLAGS },
+    { "vflip", "Vertical flip video", OFFSET(vflip), AV_OPT_TYPE_INT, {.i64 = 1}, 0, 1, FLAGS },
+    { "hflip", "Horizontal flip video", OFFSET(hflip), AV_OPT_TYPE_INT, {.i64 = 1}, 0, 1, FLAGS },
     { "past_frame_number", "set number of future frames ", OFFSET(past_frames_cnt),   AV_OPT_TYPE_INT, {.i64 = 1}, 0, MAX_PAST_FRAMES, FLAGS },
     { "noise_reduction", "set interlacing threshold", OFFSET(noise_reduction),   AV_OPT_TYPE_FLOAT, {.dbl = 0}, 0, 1.0, FLAGS },
     { "sharpness", "set progressive threshold", OFFSET(sharpness), AV_OPT_TYPE_FLOAT, {.dbl = 0},  -1, 1, FLAGS },
@@ -1137,9 +1142,20 @@ static int render_frame(AVFilterContext *ctx,
     VdpauContext *s = ctx->priv;
     VdpauFunctions *vdpauFuncs = &s->vdpaufuncs;
     VdpStatus ret;
-    VdpRect dest;
+    VdpRect dest_video_rect;
+    VdpRect video_rect;
 
-    dest = (VdpRect){0, 0, s->w, s->h};
+    dest_video_rect = (VdpRect){0, 0, s->w, s->h};
+
+    video_rect = (VdpRect){0, 0, s->w, s->h};
+
+    if (s->vflip) {
+        video_rect = (VdpRect){video_rect.x0, video_rect.y1, video_rect.x1, video_rect.y0};
+    }
+    if (s->hflip) {
+        video_rect = (VdpRect){video_rect.x1, video_rect.y0, video_rect.x0, video_rect.y1};
+    }
+
 
     ret = vdpauFuncs->vdpVideoMixerRender(s->mixer,
                                           VDP_INVALID_HANDLE,
@@ -1150,10 +1166,10 @@ static int render_frame(AVFilterContext *ctx,
                                           cur,
                                           s->future_frames_cnt,
                                           future,
-                                          NULL,
+                                          &video_rect,
                                           out,
-                                          &dest,
                                           NULL,
+                                          &dest_video_rect,
                                           layer_count,
                                           layer);
     if (ret != VDP_STATUS_OK) {
