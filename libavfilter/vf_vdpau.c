@@ -85,6 +85,8 @@ static const char *const var_names_overlay[] = {
     "y1",
     "x2",
     "y2",
+    "output_width",
+    "output_height",
     NULL
 };
 
@@ -99,6 +101,8 @@ enum var_name_overlay {
     OVERLAY_VAR_Y1,
     OVERLAY_VAR_X2,
     OVERLAY_VAR_Y2,
+    OVERLAY_VAR_OUTPUT_WIDTH,
+    OVERLAY_VAR_OUTPUT_HEIGHT,
     OVERLAY_VAR_VARS_NB
 };
 
@@ -239,6 +243,11 @@ typedef struct {
     int y2;
     int shortest;
     int repeatlast;
+
+    char *output_width_expr;
+    char *output_height_expr;
+    int output_width;
+    int output_height;
 } VdpauContext;
 
 #define OFFSET(x) offsetof(VdpauContext, x)
@@ -246,8 +255,8 @@ typedef struct {
 
 static const AVOption vdpau_options[] = {
     { "future_frame_number", "set number of future frames ", OFFSET(future_frames_cnt),   AV_OPT_TYPE_INT, {.i64 = 1}, 0, MAX_FUTURE_FRAMES, FLAGS },
-    { "vflip", "Vertical flip video", OFFSET(vflip), AV_OPT_TYPE_INT, {.i64 = 1}, 0, 1, FLAGS },
-    { "hflip", "Horizontal flip video", OFFSET(hflip), AV_OPT_TYPE_INT, {.i64 = 1}, 0, 1, FLAGS },
+    { "vflip", "Vertical flip video", OFFSET(vflip), AV_OPT_TYPE_INT, {.i64 = 0}, 0, 1, FLAGS },
+    { "hflip", "Horizontal flip video", OFFSET(hflip), AV_OPT_TYPE_INT, {.i64 = 0}, 0, 1, FLAGS },
     { "past_frame_number", "set number of future frames ", OFFSET(past_frames_cnt),   AV_OPT_TYPE_INT, {.i64 = 1}, 0, MAX_PAST_FRAMES, FLAGS },
     { "noise_reduction", "set interlacing threshold", OFFSET(noise_reduction),   AV_OPT_TYPE_FLOAT, {.dbl = 0}, 0, 1.0, FLAGS },
     { "sharpness", "set progressive threshold", OFFSET(sharpness), AV_OPT_TYPE_FLOAT, {.dbl = 0},  -1, 1, FLAGS },
@@ -267,6 +276,8 @@ static const AVOption vdpau_options[] = {
     { "y1", "set the y expression", OFFSET(y1_expr), AV_OPT_TYPE_STRING, .flags=FLAGS },
     { "x2", "set the x expression", OFFSET(x2_expr), AV_OPT_TYPE_STRING, .flags=FLAGS },
     { "y2", "set the y expression", OFFSET(y2_expr), AV_OPT_TYPE_STRING, .flags=FLAGS },
+    { "output_width", "Set the output surface width expression", OFFSET(output_width_expr), AV_OPT_TYPE_STRING, .flags=FLAGS },
+    { "output_height", "Set the output surface height expression", OFFSET(output_height_expr), AV_OPT_TYPE_STRING, .flags=FLAGS },
     { "eof_action", "Action to take when encountering EOF from secondary input ",
         OFFSET(eof_action), AV_OPT_TYPE_INT, { .i64 = EOF_ACTION_REPEAT },
         EOF_ACTION_REPEAT, EOF_ACTION_PASS, .flags = FLAGS, "eof_action" },
@@ -440,6 +451,8 @@ static int config_overlay_input(AVFilterLink *inlink)
     var_values[OVERLAY_VAR_Y1] = NAN;
     var_values[OVERLAY_VAR_X2] = NAN;
     var_values[OVERLAY_VAR_Y2] = NAN;
+    var_values[OVERLAY_VAR_OUTPUT_WIDTH] = NAN;
+    var_values[OVERLAY_VAR_OUTPUT_HEIGHT] = NAN;
 
     ret = av_expr_parse_and_eval(&res, s->x1_expr,
                            var_names_overlay, var_values,
@@ -465,10 +478,24 @@ static int config_overlay_input(AVFilterLink *inlink)
     if (ret < 0) return ret;
     var_values[OVERLAY_VAR_Y2] = res;
 
+    ret = av_expr_parse_and_eval(&res, s->output_width_expr,
+                           var_names_overlay, var_values,
+                           NULL, NULL, NULL, NULL, NULL, 0, ctx);
+    if (ret < 0) return ret;
+    var_values[OVERLAY_VAR_OUTPUT_WIDTH] = res;
+
+    ret = av_expr_parse_and_eval(&res, s->output_height_expr,
+                           var_names_overlay, var_values,
+                           NULL, NULL, NULL, NULL, NULL, 0, ctx);
+    if (ret < 0) return ret;
+    var_values[OVERLAY_VAR_OUTPUT_HEIGHT] = res;
+
     s->x1 = (int)var_values[OVERLAY_VAR_X1];
     s->y1 = (int)var_values[OVERLAY_VAR_Y1];
     s->x2 = (int)var_values[OVERLAY_VAR_X2];
     s->y2 = (int)var_values[OVERLAY_VAR_Y2];
+    s->output_width = (int)var_values[OVERLAY_VAR_OUTPUT_WIDTH];
+    s->output_height = (int)var_values[OVERLAY_VAR_OUTPUT_HEIGHT];
 
     av_log(ctx, AV_LOG_VERBOSE, "Overlay position: x1:%d y1:%d x2:%d y2:%d\n",
             s->x1, s->y1, s->x2, s->y2);
@@ -509,6 +536,24 @@ static av_cold int init_scaling(AVFilterContext *ctx)
 
     av_log(ctx, AV_LOG_VERBOSE, "w:%s h:%s\n",
            s->w_expr, s->h_expr);
+
+    return 0;
+}
+
+static av_cold init_output_size(AVFilterContext *ctx) {
+    VdpauContext *s = ctx->priv;
+    int ret;
+
+    if (!s->output_width_expr) {
+        if ((ret = av_opt_set(s, "output_width", "W", 0) < 0)) {
+            return ret;
+        }
+    }
+    if (!s->output_height_expr) {
+        if ((ret = av_opt_set(s, "output_height", "H", 0) < 0)) {
+            return ret;
+        }
+    }
 
     return 0;
 }
@@ -562,14 +607,18 @@ static av_cold int init(AVFilterContext *ctx)
             .config_props  = config_overlay_input,
         };
 
-        if ((ret = ff_insert_inpad(ctx, 0, &overlay_pad)) < 0) {
+        if ((ret = init_output_size(ctx)) < 0) {
             return ret;
         }
 
         if (!s->x2_expr)
-            av_opt_set(s, "x2_expr", "x1+overlay_w", 0);
+            av_opt_set(s, "x2", "x1+overlay_w", 0);
         if (!s->y2_expr)
-            av_opt_set(s, "y2_expr", "y1+overlay_h", 0);
+            av_opt_set(s, "y2", "y1+overlay_h", 0);
+
+        if ((ret = ff_insert_inpad(ctx, 0, &overlay_pad)) < 0) {
+            return ret;
+        }
 
         s->use_overlay = 1;
     }
@@ -968,8 +1017,14 @@ static int config_output(AVFilterLink *outlink)
         s->w = inlink->w;
         s->h = inlink->h;
     }
-    outlink->w = s->w;
-    outlink->h = s->h;
+
+    if (s->use_overlay) {
+        outlink->w = s->output_width;
+        outlink->h = s->output_height;
+    } else {
+        outlink->w = s->w;
+        outlink->h = s->h;
+    }
 
     output_hwframe_ctx             = (AVHWFramesContext*)s->output_hwframe->data;
     output_hwframe_ctx->format     = AV_PIX_FMT_VDPAU_OUTPUTSURFACE;
