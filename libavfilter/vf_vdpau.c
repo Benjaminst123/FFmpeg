@@ -44,6 +44,7 @@
 
 #define MAX_FUTURE_FRAMES 5
 #define MAX_PAST_FRAMES 5
+#define MAX_PIPELINE_SIZE 10
 
 #define MAX_SUPPORTED_FEATURES 6
 #define MAX_SUPPORTED_ATTRIBUTES 6
@@ -200,9 +201,11 @@ typedef struct {
     int in_format;
     int overlay_format;
 
+    int pipeline_size;
+
     int future_frames_cnt;
-    AVFrame *future_frames[MAX_FUTURE_FRAMES];
-    AVFrame *future_overlay_frames[MAX_FUTURE_FRAMES];
+    AVFrame *future_frames[MAX_FUTURE_FRAMES + MAX_PIPELINE_SIZE];
+    AVFrame *future_overlay_frames[MAX_FUTURE_FRAMES * MAX_PIPELINE_SIZE];
 
     int past_frames_cnt;
     AVFrame *past_frames[MAX_PAST_FRAMES];
@@ -255,9 +258,10 @@ typedef struct {
 
 static const AVOption vdpau_options[] = {
     { "future_frame_number", "set number of future frames ", OFFSET(future_frames_cnt),   AV_OPT_TYPE_INT, {.i64 = 1}, 0, MAX_FUTURE_FRAMES, FLAGS },
+    { "past_frame_number", "set number of past frames", OFFSET(past_frames_cnt),   AV_OPT_TYPE_INT, {.i64 = 1}, 0, MAX_PAST_FRAMES, FLAGS },
+    { "pipeline_size", "set number of uploaded frames", OFFSET(pipeline_size), AV_OPT_TYPE_INT, {.i64 = 1}, 0, MAX_PIPELINE_SIZE},
     { "vflip", "Vertical flip video", OFFSET(vflip), AV_OPT_TYPE_INT, {.i64 = 0}, 0, 1, FLAGS },
     { "hflip", "Horizontal flip video", OFFSET(hflip), AV_OPT_TYPE_INT, {.i64 = 0}, 0, 1, FLAGS },
-    { "past_frame_number", "set number of past frames ", OFFSET(past_frames_cnt),   AV_OPT_TYPE_INT, {.i64 = 1}, 0, MAX_PAST_FRAMES, FLAGS },
     { "noise_reduction", "set interlacing threshold", OFFSET(noise_reduction),   AV_OPT_TYPE_FLOAT, {.dbl = 0}, 0, 1.0, FLAGS },
     { "sharpness", "set progressive threshold", OFFSET(sharpness), AV_OPT_TYPE_FLOAT, {.dbl = 0},  -1, 1, FLAGS },
     { "deinterlacer", "set deinterlacing methode", OFFSET(deinterlacer), AV_OPT_TYPE_INT, {.i64 = 0},  0, TEMPORAL_SPATIAL, FLAGS, "deinterlacer"},
@@ -568,6 +572,9 @@ static av_cold int init(AVFilterContext *ctx)
     s->mixer   = 0;
     s->feature_cnt = 0;
     s->start_time = AV_NOPTS_VALUE;
+
+    //pipline
+    s->pipeline_size += s->future_frames_cnt;
 
     //parse scaling options
     if (s->size_str) {
@@ -1137,10 +1144,10 @@ static void update_frames(VdpauContext *s, AVFrame* newFrame)
     s->cur_frame = s->future_frames[0];
 
     //update next frames
-    for (i = 1; i < MAX_FUTURE_FRAMES; i++) {
+    for (i = 1; i < s->pipeline_size; i++) {
         s->future_frames[i - 1] = s->future_frames[i];
     }
-    s->future_frames[MAX_FUTURE_FRAMES - 1] = newFrame;
+    s->future_frames[s->pipeline_size - 1] = newFrame;
 }
 
 static void update_overlay_frames(VdpauContext *s, AVFrame *newFrame)
@@ -1154,10 +1161,10 @@ static void update_overlay_frames(VdpauContext *s, AVFrame *newFrame)
     s->cur_overlay_frame = s->future_overlay_frames[0];
 
     //update future frames
-    for (i = 1; i < MAX_FUTURE_FRAMES; i++) {
+    for (i = 1; i < s->pipeline_size; i++) {
         s->future_overlay_frames[i - 1] = s->future_overlay_frames[i];
     }
-    s->future_overlay_frames[MAX_FUTURE_FRAMES - 1] = newFrame;
+    s->future_overlay_frames[s->pipeline_size - 1] = newFrame;
 }
 
 static void setup_past_surfaces(VdpVideoSurface pastVideoSurfaces[], AVFrame *past_frames[])
