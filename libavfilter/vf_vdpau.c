@@ -172,6 +172,16 @@ typedef struct {
     VdpGetErrorString *vdpGetErrorString;
 } VdpauFunctions;
 
+typedef struct VDPAUContext {
+    AVBufferRef *hw_frames_ctx;
+    AVFrame *tmp_frame;
+} VDPAUContext;
+
+typedef struct VDPAUHWDevicePriv {
+    VdpDeviceDestroy *device_destroy;
+    Display *dpy;
+} VDPAUHWDevicePriv;
+
 typedef struct {
     const AVClass *class;
 
@@ -309,6 +319,100 @@ do {                                                                            
 
 static int filter_frame_vdpau(AVFilterLink *inlink, AVFrame *frame, AVFrame *overlay);
 static int filter_frame(AVFilterLink *inlink, AVFrame *frame);
+
+//VDPAU device setup
+static void device_free(AVHWDeviceContext *ctx)
+{
+    AVVDPAUDeviceContext *hwctx = ctx->hwctx;
+    VDPAUHWDevicePriv     *priv = ctx->user_opaque;
+
+    if (priv->device_destroy)
+        priv->device_destroy(hwctx->device);
+    if (priv->dpy)
+        XCloseDisplay(priv->dpy);
+    av_freep(&priv);
+}
+
+
+static int vdpau_device_init(AVFilterContext *ctx, const char *device_name)
+{
+    const char *display, *vendor;
+    VdpStatus err;
+    int ret;
+    int loglevel = AV_LOG_ERROR;
+    VdpauContext *s = ctx->priv;
+    VdpauFunctions *vdpauFuncs = &s->vdpaufuncs;
+
+    AVBufferRef *hw_device_ctx;
+
+    VdpDevice                device;
+    VdpGetInformationString *get_information_string;
+
+    VDPAUHWDevicePriv    *device_priv = NULL;
+    AVHWDeviceContext    *device_ctx;
+    AVVDPAUDeviceContext *device_hwctx;
+
+    device_priv = av_mallocz(sizeof(*device_priv));
+    if (!device_priv) {
+        goto fail;
+    }
+
+    device_priv->dpy = XOpenDisplay(device_name);
+    if (!device_priv->dpy) {
+        av_log(NULL, loglevel, "Cannot open the X11 display %s.\n",
+               XDisplayName(device_name));
+        goto fail;
+    }
+    display = XDisplayString(device_priv->dpy);
+
+    err = vdp_device_create_x11(device_priv->dpy, XDefaultScreen(device_priv->dpy),
+                                &device, &vdpauFuncs->get_proc_address);
+    if (err != VDP_STATUS_OK) {
+        av_log(NULL, loglevel, "VDPAU device creation on X11 display %s failed.\n",
+               display);
+        goto fail;
+    }
+
+    s->device = device;
+
+    GET_CALLBACK(VDP_FUNC_ID_GET_INFORMATION_STRING, get_information_string);
+    GET_CALLBACK(VDP_FUNC_ID_DEVICE_DESTROY, device_priv->device_destroy);
+
+    hw_device_ctx = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_VDPAU);
+    if (!hw_device_ctx)
+        goto fail;
+    device_ctx                     = (AVHWDeviceContext*)hw_device_ctx->data;
+    device_hwctx                   = device_ctx->hwctx;
+    device_ctx->user_opaque        = device_priv;
+    device_ctx->free               = device_free;
+    device_hwctx->device           = device;
+    device_hwctx->get_proc_address = vdpauFuncs->get_proc_address;
+
+    device_priv = NULL;
+
+    ret = av_hwdevice_ctx_init(hw_device_ctx);
+    if (ret < 0)
+        goto fail;
+
+    get_information_string(&vendor);
+    av_log(NULL, AV_LOG_VERBOSE, "Using VDPAU -- %s -- on X11 display %s, ",
+           vendor, display);
+
+    s->hwdevice = hw_device_ctx;
+    return 0;
+
+    fail:
+        av_log(NULL, loglevel, "VDPAU init failed!");
+        if (device_priv) {
+            if (device_priv->device_destroy)
+                device_priv->device_destroy(device);
+            if (device_priv->dpy)
+                XCloseDisplay(device_priv->dpy);
+        }
+        av_freep(&device_priv);
+        av_buffer_unref(&hw_device_ctx);
+        return AVERROR_UNKNOWN;
+}
 
 static int check_support(VdpauContext *s, VdpVideoMixerFeature feature, const char* name) {
     VdpauFunctions *vdpauFuncs = &s->vdpaufuncs;
@@ -630,6 +734,10 @@ static av_cold int init(AVFilterContext *ctx)
         s->use_overlay = 1;
     }
 
+    if ((ret = vdpau_device_init(ctx, ":0")) < 0) {
+        return ret;
+    }
+
     return 0;
 }
 
@@ -783,16 +891,18 @@ static int config_input(AVFilterLink *inlink)
     s->attributes[s->attribute_cnt] = VDP_VIDEO_MIXER_ATTRIBUTE_BACKGROUND_COLOR;
     s->attribute_values[s->attribute_cnt++] = &background_color;
 
-    if (ctx->hw_device_ctx == 0) {
-        av_log(ctx, AV_LOG_ERROR, "No vdpau device given\n");
-        return -1;
+    if (ctx->hw_device_ctx == NULL && inlink->format == AV_PIX_FMT_VDPAU) {
+        av_log(ctx, AV_LOG_INFO, "No vdpau device given\n");
+        return AVERROR_INVALIDDATA;
+    } else if (ctx->hw_device_ctx != NULL) {
+        av_buffer_unref(&s->hwdevice);
+        //allocate hardware context
+        s->hwdevice = av_buffer_ref(ctx->hw_device_ctx);
+        if (s->hwdevice == NULL) {
+            return AVERROR(ENOMEM);
+        }
     }
 
-    //allocate hardware context
-    s->hwdevice = av_buffer_ref(ctx->hw_device_ctx);
-    if (s->hwdevice == NULL) {
-        return AVERROR(ENOMEM);
-    }
 
     device_ctx       = (AVHWDeviceContext*)s->hwdevice->data;
     device_hwctx = device_ctx->hwctx;
