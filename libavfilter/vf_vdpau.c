@@ -377,6 +377,8 @@ static int vdpau_device_init(AVFilterContext *ctx, const char *device_name)
 
     GET_CALLBACK(VDP_FUNC_ID_GET_INFORMATION_STRING, get_information_string);
     GET_CALLBACK(VDP_FUNC_ID_DEVICE_DESTROY, device_priv->device_destroy);
+    GET_CALLBACK(VDP_FUNC_ID_OUTPUT_SURFACE_QUERY_GET_PUT_BITS_NATIVE_CAPABILITIES, vdpauFuncs->VdpOutputSurfaceQueryGetPutBitsNativeCapabilities);
+    GET_CALLBACK(VDP_FUNC_ID_OUTPUT_SURFACE_QUERY_CAPABILITIES, vdpauFuncs->VdpOutputSurfaceQueryCapabilities);
 
     hw_device_ctx = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_VDPAU);
     if (!hw_device_ctx)
@@ -834,17 +836,16 @@ static int query_formats(AVFilterContext *ctx)
         AV_PIX_FMT_BGRA,
         AV_PIX_FMT_NONE
     };
-    static const enum AVPixelFormat pix_fmts_out[] = {
-        AV_PIX_FMT_VDPAU_OUTPUTSURFACE,
-        AV_PIX_FMT_BGRA,
-        AV_PIX_FMT_NONE
-    };
 
     in_formats = ff_make_format_list(pix_fmts_in);
-    out_formats = ff_make_format_list(pix_fmts_out);
-    if (!in_formats || !out_formats) {
+    if (!in_formats) {
         return AVERROR(ENOMEM);
     }
+
+    if ((ret = add_supported_output_formats(ctx, &out_formats)) < 0) {
+        return ret;
+    }
+
 
     if ((ret = ff_formats_ref(in_formats, &inlink->out_formats)) < 0) {
         return ret;
@@ -854,11 +855,12 @@ static int query_formats(AVFilterContext *ctx)
     }
 
     if (s->use_overlay) {
+        AVFilterFormats *overlay_in_formats = NULL;
         AVFilterLink *inlink_overlay  = ctx->inputs[1];
-        if ((in_formats = ff_make_format_list(pix_fmt_overlay_in)) == 0) {
-            return AVERROR(ENOMEM);
+        if ((ret = add_supported_overlay_formats(ctx, &overlay_in_formats)) < 0) {
+            return ret;
         }
-        if ((ret = ff_formats_ref(in_formats, &inlink_overlay->out_formats)) < 0) {
+        if ((ret = ff_formats_ref(overlay_in_formats, &inlink_overlay->out_formats)) < 0) {
             return ret;
         }
 
