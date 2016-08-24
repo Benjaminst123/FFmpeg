@@ -125,25 +125,6 @@ typedef struct VDPAUPRGBFmpMap {
     enum AVPixelFormat pix_fmt;
 } VDPAUPRGBFmpMap ;
 
-static const VDPAUPRGBFmpMap  pix_fmts_rgb[] = {
-    { VDP_RGBA_FORMAT_R8G8B8A8, AV_PIX_FMT_RGBA},
-    { VDP_RGBA_FORMAT_B8G8R8A8, AV_PIX_FMT_BGRA},
-    { VDP_INVALID_HANDLE,       AV_PIX_FMT_NONE}
-};
-
-static int get_vdpau_rgb_format(enum AVPixelFormat format)
-{
-    size_t i;
-
-    for (i = 0; i < FF_ARRAY_ELEMS(pix_fmts_rgb); i++) {
-        if (pix_fmts_rgb[i].pix_fmt == format) {
-            return pix_fmts_rgb[i].vdpau_fmt;
-        }
-    }
-
-    return VDP_INVALID_HANDLE;
-}
-
 typedef struct {
     VdpGetProcAddress *get_proc_address;
 
@@ -829,11 +810,6 @@ static int query_formats(AVFilterContext *ctx)
     static const enum AVPixelFormat pix_fmts_in[] = {
         AV_PIX_FMT_VDPAU,
         AV_PIX_FMT_YUV420P,
-        AV_PIX_FMT_NONE
-    };
-    static const enum AVPixelFormat pix_fmt_overlay_in[] = {
-        AV_PIX_FMT_VDPAU_OUTPUTSURFACE,
-        AV_PIX_FMT_BGRA,
         AV_PIX_FMT_NONE
     };
 
