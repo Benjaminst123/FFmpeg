@@ -13011,6 +13011,113 @@ Force a constant quantization parameter. If not set, the filter will use the QP
 from the video stream (if available).
 @end table
 
+@section vdpau
+
+Apply filtering provided by Video Decode and Presentation API for Unix (VDPAU).
+
+This filter provides different types of deinterlacing, noise reduction,
+sharpness adjustment, scaling and overlay rendering.
+
+This filter accepts he following options:
+
+@table @option
+@item vflip
+Vertical flip the video.
+
+@item hflip
+Horizontall flip the video.
+
+@item noise_reduction
+The amont of noise reduction to apply. Range can be between 0.0 and 1.0.
+Default is 0.0, which equates to no noise reduction.
+
+@item sharpness
+The amount of sharpening or blurring to apply. Range can be between -1.0 and 1.0.
+Positive values request sharpening. Negative values request blurring.
+Default is 0.0, which equates to no sharpening.
+
+@item deinterlacer
+Deinterlacing methode to apply. Default is no deinterlacing.
+
+It accepts the following values:
+@table @samp
+@item bob
+Use bob deinterlacing.
+
+@item temporal
+Use motion adaptive temporal deinterlacing.
+
+@item temporal_spatial
+Use motion adaptive temporal deinterlacing, that additionally uses edge-guided
+spatial interpolation.
+@end table
+
+@item double_framerate
+Double framerate, if deinterlacing is used. Default is 0.
+
+@item width, w
+@item height, h
+Set the output video dimension expression. Default value is the input
+dimension.
+
+If the value is 0, the input width is used for the output.
+
+If one of the values is -1, the scale filter will use a value that
+maintains the aspect ratio of the input image, calculated from the
+other specified dimension. If both of them are -1, the input size is
+used.
+
+@item scaling_quality
+Selects the scaling quality, if scaling needs to be applied.
+Can be between 0 and 9. Default is 0.
+
+@item future_frame_number
+Number of future frames to consider.
+
+@item past_frame_number
+Number of past frames to consider.
+
+@item x1
+@item x2
+@item y1
+@item y2
+Set overlay position if overlay is used. Origin is top left.
+
+@item output_width
+@item output_height
+Set output frame width,height. Default is video width,height.
+
+@item eof_action
+Action to take when encountering EOF from secondary input.
+
+It accepts the following values:
+@table @samp
+@item repeat
+Repeat the previous frame.
+
+@item endall
+End both streams.
+
+@item pass
+Pass through the main input.
+@end table
+
+@end table
+
+@subsection Examples
+
+@itemize
+@item Resize video to half size and width, blurr and denoise video.
+@example
+vdpau=w=W/w:h=H/2:sharpness=-1:noise_reduction=1
+@end example
+
+@item Deinterlace video
+@example
+vdpau=deinterlacer=temporal_spatial:double_framerate=1
+@end example
+@end itemize
+
 @section vectorscope
 
 Display 2 color component values in the two dimensional graph (which is called
